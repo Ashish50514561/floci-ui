@@ -6,6 +6,7 @@ import {
   createCloudResource,
   clearEmailInbox,
   deleteCloudResource,
+  getCloudResource,
   getServiceSchema,
   listCloudResources,
   updateCloudResource,
@@ -34,6 +35,7 @@ import type { CloudResource, StorageObject } from "@/types/resource";
 import type { ServiceSchema } from "@/types/schema";
 import { ServerlessInvokePanel } from "@/components/ServerlessInvokePanel";
 import { dataExplorerPath } from "@/lib/dataExplorer";
+import { useAccountId } from "@/lib/accountStore";
 import { WorkflowExecutionsPanel } from "@/components/WorkflowExecutionsPanel";
 import { DatabaseSnapshotsPanel } from "@/components/DatabaseSnapshotsPanel";
 import { CreateRdsInstanceForm } from "@/components/CreateRdsInstanceForm";
@@ -63,10 +65,17 @@ export function DynamicResourceView({
   onOpenInfo,
 }: DynamicResourceViewProps) {
   const qc = useQueryClient();
+  const accountId = useAccountId();
   const [search, setSearch] = useState("");
   const [databaseTab, setDatabaseTab] = useState<"instances" | "snapshots">("instances");
   const [logsTab, setLogsTab] = useState<"groups" | "insights">("groups");
-  const [selected, setSelected] = useState<CloudResource | undefined>();
+  const [selection, setSelection] = useState<
+    { accountId: string; resource: CloudResource } | undefined
+  >();
+  const selected = selection?.accountId === accountId ? selection.resource : undefined;
+  const selectResource = (resource: CloudResource | undefined) => {
+    setSelection(resource ? { accountId, resource } : undefined);
+  };
   const [selectedObject, setSelectedObject] = useState<
     StorageObject | undefined
   >();
@@ -93,8 +102,8 @@ export function DynamicResourceView({
   };
 
   const resourcesKey = useMemo(
-    () => ["cloud-resources", cloud, service, search],
-    [cloud, service, search],
+    () => ["cloud-resources", accountId, cloud, service, search],
+    [accountId, cloud, service, search],
   );
 
   const schemaQuery = useQuery({
@@ -110,12 +119,26 @@ export function DynamicResourceView({
       serviceAvailability === "available" &&
       cloudStatus?.runtime === "reachable",
   });
+  const selectedForService =
+    selected?.cloud === cloud && selected.service === service
+      ? selected
+      : undefined;
+  const resourceDetailQuery = useQuery({
+    queryKey: ["cloud-resource", accountId, cloud, service, selectedForService?.id],
+    queryFn: ({ signal }) =>
+      getCloudResource(cloud, service, selectedForService!.id, signal),
+    enabled:
+      selectedForService !== undefined &&
+      schemaQuery.data?.actions.includes("inspect") === true &&
+      serviceAvailability === "available" &&
+      cloudStatus?.runtime === "reachable",
+  });
   const isAwsSageMaker = cloud === "aws" && service === "sagemaker";
   const canDeleteResource = isAwsSageMaker
     ? (resource: CloudResource) => resource.type !== "sagemaker-training-job"
     : undefined;
   const sagemakerDashboardResourcesQuery = useQuery({
-    queryKey: ["sagemaker-dashboard-resources", cloud, service],
+    queryKey: ["sagemaker-dashboard-resources", accountId, cloud, service],
     queryFn: ({ signal }) => listCloudResources(cloud, service, "", signal),
     enabled:
       isAwsSageMaker &&
@@ -166,10 +189,10 @@ export function DynamicResourceView({
     mutationFn: (values: Record<string, unknown>) =>
       createCloudResource(cloud, service, values),
     onSuccess: (resource) => {
-      setSelected(resource);
+      selectResource(resource);
       setCreateOpen(false);
       void qc.invalidateQueries({
-        queryKey: ["cloud-resources", cloud, service],
+        queryKey: ["cloud-resources", accountId, cloud, service],
       });
     },
   });
@@ -178,10 +201,10 @@ export function DynamicResourceView({
     mutationFn: (resource: CloudResource) =>
       deleteCloudResource(cloud, service, resource.id),
     onSuccess: (_, resource) => {
-      if (selected?.id === resource.id) setSelected(undefined);
+      if (selected?.id === resource.id) selectResource(undefined);
       setSelectedItems((prev) => prev.filter((item) => item.id !== resource.id));
       void qc.invalidateQueries({
-        queryKey: ["cloud-resources", cloud, service],
+        queryKey: ["cloud-resources", accountId, cloud, service],
       });
     },
   });
@@ -209,7 +232,7 @@ export function DynamicResourceView({
     },
     onSettled: () => {
       void qc.invalidateQueries({
-        queryKey: ["cloud-resources", cloud, service],
+        queryKey: ["cloud-resources", accountId, cloud, service],
       });
     },
     onSuccess: ({ succeededIds, failedItems }) => {
@@ -218,7 +241,7 @@ export function DynamicResourceView({
         prev.filter((item) => !succeededIds.has(item.id)),
       );
       if (selected && succeededIds.has(selected.id)) {
-        setSelected(undefined);
+        selectResource(undefined);
       }
 
       if (failedItems.length > 0) {
@@ -240,10 +263,10 @@ export function DynamicResourceView({
   const clearInboxMut = useMutation({
     mutationFn: () => clearEmailInbox(cloud),
     onSuccess: () => {
-      setSelected(undefined);
+      selectResource(undefined);
       setClearConfirm(false);
       void qc.invalidateQueries({
-        queryKey: ["cloud-resources", cloud, service],
+        queryKey: ["cloud-resources", accountId, cloud, service],
       });
     },
   });
@@ -265,10 +288,14 @@ export function DynamicResourceView({
     onSuccess: (updatedResource) => {
       setEditingResource(null);
       setUpdateError(null);
-      setSelected(updatedResource);
+      selectResource(updatedResource);
       setSuccessToast(`Successfully updated ${updatedResource.name || updatedResource.id}`);
       void qc.invalidateQueries({
-        queryKey: ["cloud-resources", cloud, service],
+        queryKey: ["cloud-resources", accountId, cloud, service],
+      });
+      void qc.resetQueries({
+        queryKey: ["cloud-resource", accountId, cloud, service, updatedResource.id],
+        exact: true,
       });
     },
     onError: (err) => {
@@ -324,7 +351,7 @@ export function DynamicResourceView({
   }
 
   useEffect(() => {
-    setSelected(undefined);
+    setSelection(undefined);
     setSelectedObject(undefined);
     setCreateOpen(false);
     setClearConfirm(false);
@@ -336,7 +363,7 @@ export function DynamicResourceView({
     setDatabaseTab("instances");
     setIsDeleteMulti(false);
     setSelectedItems([]);
-  }, [cloud, service]);
+  }, [accountId, cloud, service]);
 
   useEffect(() => {
     if (selectedItems.length === 0 && deleteConfirm) {
@@ -405,10 +432,11 @@ export function DynamicResourceView({
   const isAllSelected =
     selectableResources.length > 0 &&
     selectableResources.every((r) => selectedItems.some((s) => s.id === r.id));
-  const activeSelected =
-    selected?.cloud === cloud && selected.service === service
-      ? selected
-      : undefined;
+  const activeSelected = selectedForService;
+  const inspectedResource =
+    !resourceDetailQuery.isFetching && resourceDetailQuery.data?.id === activeSelected?.id
+      ? resourceDetailQuery.data
+      : activeSelected;
   const runtimeReachable = cloudStatus?.runtime === "reachable";
   const resourceCapabilityInputs =
     schema.capabilities?.resourceActions ?? schema.actions;
@@ -583,11 +611,32 @@ export function DynamicResourceView({
                   <button
                     className="button"
                     type="button"
-                    disabled={!canUseRuntime || resourcesQuery.isFetching}
-                    onClick={() => resourcesQuery.refetch()}
+                    disabled={
+                      !canUseRuntime || resourcesQuery.isFetching || resourceDetailQuery.isFetching
+                    }
+                    onClick={() => {
+                      void resourcesQuery.refetch();
+                      if (
+                        selectedForService !== undefined &&
+                        schema.actions.includes("inspect")
+                      ) {
+                        void qc.resetQueries({
+                          queryKey: [
+                            "cloud-resource",
+                            accountId,
+                            cloud,
+                            service,
+                            selectedForService.id,
+                          ],
+                          exact: true,
+                        });
+                      }
+                    }}
                   >
                     <RefreshCw size={14} />
-                    {resourcesQuery.isFetching ? "Loading" : "Refresh"}
+                    {resourcesQuery.isFetching || resourceDetailQuery.isFetching
+                      ? "Loading"
+                      : "Refresh"}
                   </button>
                   {canDelete && (
                     deleteConfirm ? (
@@ -670,7 +719,7 @@ export function DynamicResourceView({
                       cloud={cloud}
                       selectedResource={activeSelected}
                       onSuccess={(resource) => {
-                        setSelected(resource);
+                        selectResource(resource);
                         setCreateOpen(false);
                       }}
                       onCancel={() => setCreateOpen(false)}
@@ -679,7 +728,7 @@ export function DynamicResourceView({
                     <CreateRdsInstanceForm
                       cloud={cloud}
                       onSuccess={(resource) => {
-                        setSelected(resource);
+                        selectResource(resource);
                         setCreateOpen(false);
                       }}
                       onCancel={() => setCreateOpen(false)}
@@ -714,7 +763,7 @@ export function DynamicResourceView({
                 resourcesLoading: resourcesQuery.isLoading,
                 resourcesError: resourcesQuery.error,
                 isRetrying: resourcesQuery.isFetching,
-                onSelect: setSelected,
+                onSelect: selectResource,
                 onEdit:
                   schema.updateFields &&
                     schema.updateFields.length > 0 &&
@@ -744,7 +793,7 @@ export function DynamicResourceView({
         </section>
         {activeSelected && !showDatabaseSnapshots && !showLogsInsights && (
           <ResourceInspector
-            resource={activeSelected}
+            resource={inspectedResource}
             object={selectedObject}
             cloud={cloud}
             runtimeReachable={canUseRuntime}
