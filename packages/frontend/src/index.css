@@ -4551,3 +4551,10 @@ button.console-service-card {
     color: var(--text-bright);
     font-weight: 600;
 }
+
+@media (max-width: 600px) {
+    .settings-section .settings-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+}
