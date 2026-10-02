@@ -152,6 +152,11 @@ export const SERVICE_CATALOG = {
         group: 'Integration',
         order: 10,
     },
+    sns: {
+        displayName: 'SNS',
+        description: 'Manage standard and FIFO notification topics.',
+        iconKey: 'messaging', group: 'Integration', order: 11,
+    },
     streams: {
         displayName: 'Streams',
         displayNameByCloud: {aws: 'Kinesis', oci: 'Streaming'},
