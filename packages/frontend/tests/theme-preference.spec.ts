@@ -27,7 +27,11 @@ async function mockCloudApi(page: Page) {
 async function expectCloud(page: Page, cloud: string) {
     await expect(page.getByRole('link', {name: 'Console Home', exact: true})).toHaveAttribute('href', `/console/${cloud}`)
     await expect(page.locator('.cloud-service-nav > .nav-label')).toHaveText(`Cloud Services · ${cloud.toUpperCase()}`)
-    await expect(page.getByRole('button', {name: `Switch cloud, currently ${cloud.toUpperCase()}`})).toBeVisible()
+    await expect(page.locator('.topbar .cloud-switcher, .topbar .account-switcher')).toHaveCount(0)
+    if (/^\/settings\/?$/i.test(new URL(page.url()).pathname)) {
+        await expect(page.getByRole('button', {name: `Switch cloud, currently ${cloud.toUpperCase()}`})).toBeVisible()
+        await expect(page.getByRole('button', {name: /Switch AWS account/})).toHaveCount(1)
+    }
 }
 
 for (const cloud of clouds) {

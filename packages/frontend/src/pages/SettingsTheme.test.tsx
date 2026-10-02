@@ -1,8 +1,12 @@
 import {act, render, screen} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import {QueryClient, QueryClientProvider} from '@tanstack/react-query'
+import {MemoryRouter} from 'react-router-dom'
 import {afterEach, describe, expect, it, vi} from 'vitest'
 import {useTheme} from '@/lib/useTheme'
 import {SettingsPage} from './SettingsPage'
+
+vi.mock('@/api/queries/cloudQueries', () => ({useCloudsQuery: () => ({data: []})}))
 
 function ResolvedTheme() {
     const {resolvedTheme} = useTheme()
@@ -23,7 +27,14 @@ describe('Settings theme preference', () => {
         })))
         const user = userEvent.setup()
 
-        render(<><SettingsPage/><ResolvedTheme/></>)
+        const queryClient = new QueryClient({defaultOptions: {queries: {retry: false}}})
+        render(
+            <QueryClientProvider client={queryClient}>
+                <MemoryRouter initialEntries={['/settings']}>
+                    <SettingsPage/><ResolvedTheme/>
+                </MemoryRouter>
+            </QueryClientProvider>,
+        )
 
         await user.click(screen.getByRole('radio', {name: 'System'}))
         expect(screen.getByRole('radio', {name: 'System'})).toHaveAttribute('aria-checked', 'true')
