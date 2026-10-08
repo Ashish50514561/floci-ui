@@ -183,28 +183,31 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
 
         {tab === "send" && (
           <>
-            <label className="metric-label" htmlFor="sqs-message-body">Message body</label>
-            <textarea
-              id="sqs-message-body"
-              className="json-editor"
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
-              spellCheck={false}
-              placeholder="Message body"
-              style={{minHeight: 120, marginBottom: 12}}
-            />
-
-            <label className="metric-label">Custom attributes</label>
-            <div style={{display: "flex", gap: "8px", marginBottom: "8px"}}>
-              <input
-                type="text"
-                className="button"
-                placeholder="Key"
-                value={attrKey}
-                onChange={(e) => setAttrKey(e.target.value)}
-                maxLength={256}
-                style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
+            <div style={{ marginBottom: "16px" }}>
+              <label className="metric-label" htmlFor="sqs-message-body" style={{ display: "block", marginBottom: "6px" }}>Message body</label>
+              <textarea
+                id="sqs-message-body"
+                className="json-editor"
+                value={body}
+                onChange={(event) => setBody(event.target.value)}
+                spellCheck={false}
+                placeholder="Message body"
+                style={{minHeight: 120, width: "100%", display: "block"}}
               />
+            </div>
+
+            <div style={{ marginBottom: "16px" }}>
+              <label className="metric-label" style={{ display: "block", marginBottom: "6px" }}>Custom attributes</label>
+              <div style={{display: "flex", gap: "8px", marginBottom: "8px"}}>
+                <input
+                  type="text"
+                  className="button"
+                  placeholder="Key"
+                  value={attrKey}
+                  onChange={(e) => setAttrKey(e.target.value)}
+                  maxLength={256}
+                  style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
+                />
               <input
                 type="text"
                 className="button"
@@ -249,6 +252,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 ))}
               </ul>
             )}
+            </div>
 
             <button
               className="button primary"
