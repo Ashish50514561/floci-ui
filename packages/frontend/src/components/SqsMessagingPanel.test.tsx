@@ -49,6 +49,24 @@ describe("SqsMessagingPanel", () => {
     expect(await screen.findByText("msg-1")).toBeInTheDocument();
   });
 
+  test("sends a message with custom attributes", async () => {
+    vi.mocked(sendQueueMessage).mockResolvedValue({messageId: "msg-attr"});
+    const user = userEvent.setup();
+
+    render(<SqsMessagingPanel cloud="aws" resource={resource} runtimeReachable={true}/>);
+
+    await user.type(screen.getByLabelText("Message body"), "hello with attr");
+    await user.type(screen.getByPlaceholderText("Key"), "TenantId");
+    await user.type(screen.getByPlaceholderText("Value"), "t-123");
+    await user.click(screen.getByRole("button", {name: "Add attribute"}));
+
+    const sendButtons = screen.getAllByRole("button", {name: "Send"});
+    await user.click(sendButtons[sendButtons.length - 1]);
+
+    expect(sendQueueMessage).toHaveBeenCalledWith("aws", "messaging", "orders-queue", "hello with attr", {TenantId: "t-123"});
+    expect(await screen.findByText("msg-attr")).toBeInTheDocument();
+  });
+
   test("receives messages as a non-consuming peek and deletes one by receipt handle", async () => {
     const received: QueueMessage[] = [
       {messageId: "msg-1", body: "hello", receiptHandle: "handle-1"},
