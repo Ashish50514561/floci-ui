@@ -147,13 +147,22 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
             }),
         )
 
-        return (res.Messages ?? []).map((message) => ({
-            messageId: message.MessageId ?? '',
-            body: message.Body ?? '',
-            receiptHandle: message.ReceiptHandle ?? '',
-            attributes: message.Attributes,
-            md5OfBody: message.MD5OfBody,
-        }))
+        return (res.Messages ?? []).map((message) => {
+            const messageAttributes: Record<string, string> = {}
+            if (message.MessageAttributes) {
+                for (const [key, value] of Object.entries(message.MessageAttributes)) {
+                    messageAttributes[key] = value.StringValue ?? '<Binary Data>'
+                }
+            }
+            return {
+                messageId: message.MessageId ?? '',
+                body: message.Body ?? '',
+                receiptHandle: message.ReceiptHandle ?? '',
+                attributes: message.Attributes,
+                messageAttributes: Object.keys(messageAttributes).length > 0 ? messageAttributes : undefined,
+                md5OfBody: message.MD5OfBody,
+            }
+        })
     }
 
     async deleteMessage(id: string, receiptHandle: string): Promise<void> {

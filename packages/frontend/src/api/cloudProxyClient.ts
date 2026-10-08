@@ -292,6 +292,7 @@ export interface QueueMessage {
   body: string;
   receiptHandle: string;
   attributes?: Record<string, string>;
+  messageAttributes?: Record<string, string>;
   md5OfBody?: string;
 }
 

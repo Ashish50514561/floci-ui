@@ -108,14 +108,38 @@ describe("SqsMessagingPanel", () => {
 
     expect(await screen.findByText("payload")).toBeInTheDocument();
     
-    // attributes summary should be present
-    const summary = screen.getByText("Attributes (2)");
+    // system attributes summary should be present
+    const summary = screen.getByText("System Attributes (2)");
     expect(summary).toBeInTheDocument();
 
     // open the details block and verify contents
     await user.click(summary);
     expect(screen.getByText("SenderId")).toBeInTheDocument();
     expect(screen.getByText("AIDAJDPLRKLG7EXAMPLE")).toBeInTheDocument();
+  });
+
+  test("shows custom message attributes in a separate collapsible block", async () => {
+    const received: QueueMessage[] = [
+      {
+        messageId: "msg-3",
+        body: "payload",
+        receiptHandle: "handle-3",
+        messageAttributes: {OrderId: "ord-42", Env: "prod"},
+      },
+    ];
+    vi.mocked(receiveQueueMessages).mockResolvedValue(received);
+    const user = userEvent.setup();
+
+    render(<SqsMessagingPanel cloud="aws" resource={resource} runtimeReachable={true}/>);
+
+    await user.click(screen.getByRole("button", {name: "Receive"}));
+    await user.click(screen.getByRole("button", {name: "Receive messages"}));
+
+    const customSummary = await screen.findByText("Custom Attributes (2)");
+    expect(customSummary).toBeInTheDocument();
+    await user.click(customSummary);
+    expect(screen.getByText("OrderId")).toBeInTheDocument();
+    expect(screen.getByText("ord-42")).toBeInTheDocument();
   });
 
   test("disables actions when the runtime is unreachable", () => {

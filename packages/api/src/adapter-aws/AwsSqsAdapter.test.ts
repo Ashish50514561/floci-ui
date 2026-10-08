@@ -33,7 +33,12 @@ function stubSqs(handlers: {
     queues?: string[]
     attributes?: Record<string, string>
     missingQueue?: boolean
-    messages?: Array<{MessageId: string; Body: string; ReceiptHandle: string}>
+    messages?: Array<{
+        MessageId: string
+        Body: string
+        ReceiptHandle: string
+        MessageAttributes?: Record<string, {DataType: string; StringValue?: string; BinaryValue?: Uint8Array}>
+    }>
 } = {}) {
     const sent: object[] = []
     const client = {
@@ -288,7 +293,26 @@ describe('AwsSqsAdapter', () => {
         const receive = sent[1] as ReceiveMessageCommand
         expect(receive).toBeInstanceOf(ReceiveMessageCommand)
         expect(receive.input.VisibilityTimeout).toBe(0)
-        expect(messages).toEqual([{messageId: 'msg-1', body: 'hello', receiptHandle: 'handle-1', attributes: undefined, md5OfBody: undefined}])
+        expect(messages).toEqual([{messageId: 'msg-1', body: 'hello', receiptHandle: 'handle-1', attributes: undefined, messageAttributes: undefined, md5OfBody: undefined}])
+    })
+
+    test('maps user-defined MessageAttributes to messageAttributes', async () => {
+        const {client} = stubSqs({
+            messages: [{
+                MessageId: 'msg-2',
+                Body: 'test',
+                ReceiptHandle: 'handle-2',
+                MessageAttributes: {
+                    CustomId: {DataType: 'String', StringValue: '1234'},
+                    BinaryAttr: {DataType: 'Binary', BinaryValue: new Uint8Array([1, 2])},
+                },
+            }],
+        })
+        const messages = await new AwsSqsAdapter(client).receiveMessages('orders-queue')
+        expect(messages[0].messageAttributes).toEqual({
+            CustomId: '1234',
+            BinaryAttr: '<Binary Data>',
+        })
     })
 
     test('clamps maxMessages to the SQS-documented 1-10 range', async () => {

@@ -276,10 +276,27 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                   </button>
                 </div>
                 <pre className="invoke-result success">{message.body}</pre>
+                {message.messageAttributes && Object.keys(message.messageAttributes).length > 0 && (
+                  <details style={{marginTop: 4}}>
+                    <summary className="metric-label" style={{cursor: "pointer", userSelect: "none"}}>
+                      Custom Attributes ({Object.keys(message.messageAttributes).length})
+                    </summary>
+                    <table style={{width: "100%", borderCollapse: "collapse", marginTop: 4, fontSize: "0.8em"}}>
+                      <tbody>
+                        {Object.entries(message.messageAttributes).map(([key, value]) => (
+                          <tr key={key}>
+                            <td className="metric-label" style={{paddingRight: 12, verticalAlign: "top", whiteSpace: "nowrap"}}>{key}</td>
+                            <td><code style={{wordBreak: "break-all"}}>{value}</code></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </details>
+                )}
                 {message.attributes && Object.keys(message.attributes).length > 0 && (
                   <details style={{marginTop: 4}}>
                     <summary className="metric-label" style={{cursor: "pointer", userSelect: "none"}}>
-                      Attributes ({Object.keys(message.attributes).length})
+                      System Attributes ({Object.keys(message.attributes).length})
                     </summary>
                     <table style={{width: "100%", borderCollapse: "collapse", marginTop: 4, fontSize: "0.8em"}}>
                       <tbody>
