@@ -27,6 +27,9 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [maxMessages, setMaxMessages] = useState<number | "">(10);
+  const [attrKey, setAttrKey] = useState("");
+  const [attrValue, setAttrValue] = useState("");
+  const [customAttributes, setCustomAttributes] = useState<Record<string, string>>({});
   const [messages, setMessages] = useState<QueueMessage[]>([]);
   const [hasPolled, setHasPolled] = useState(false);
   const [receiveError, setReceiveError] = useState<string | null>(null);
@@ -47,6 +50,9 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
     setSendError(null);
     setSending(false);
     setMaxMessages(10);
+    setAttrKey("");
+    setAttrValue("");
+    setCustomAttributes({});
     setMessages([]);
     setHasPolled(false);
     setReceiveError(null);
@@ -81,9 +87,10 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
     setSendResult(null);
     setSending(true);
     try {
-      const result = await sendQueueMessage(cloud, "messaging", resource.id, body);
+      const result = await sendQueueMessage(cloud, "messaging", resource.id, body, Object.keys(customAttributes).length > 0 ? customAttributes : undefined);
       setSendResult({messageId: result.messageId});
       setBody("");
+      setCustomAttributes({});
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to send the message.");
     } finally {
@@ -184,8 +191,62 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
               onChange={(event) => setBody(event.target.value)}
               spellCheck={false}
               placeholder="Message body"
-              style={{minHeight: 120}}
+              style={{minHeight: 120, marginBottom: 12}}
             />
+
+            <label className="metric-label">Custom attributes</label>
+            <div style={{display: "flex", gap: "8px", marginBottom: "8px"}}>
+              <input
+                type="text"
+                className="button"
+                placeholder="Key"
+                value={attrKey}
+                onChange={(e) => setAttrKey(e.target.value)}
+                style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
+              />
+              <input
+                type="text"
+                className="button"
+                placeholder="Value"
+                value={attrValue}
+                onChange={(e) => setAttrValue(e.target.value)}
+                style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
+              />
+              <button
+                className="button"
+                type="button"
+                disabled={!attrKey.trim() || !attrValue.trim()}
+                onClick={() => {
+                  setCustomAttributes(prev => ({...prev, [attrKey.trim()]: attrValue.trim()}));
+                  setAttrKey("");
+                  setAttrValue("");
+                }}
+              >
+                Add attribute
+              </button>
+            </div>
+            {Object.keys(customAttributes).length > 0 && (
+              <ul className="muted compact-text" style={{listStyle: "none", padding: 0, marginBottom: "16px"}}>
+                {Object.entries(customAttributes).map(([k, v]) => (
+                  <li key={k} style={{display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--bg-muted)", padding: "4px 8px", borderRadius: "4px", marginBottom: "4px"}}>
+                    <span style={{wordBreak: "break-all"}}><strong>{k}</strong>: {v}</span>
+                    <button
+                      className="button"
+                      type="button"
+                      style={{padding: "2px 4px", minWidth: "unset"}}
+                      onClick={() => {
+                        const next = {...customAttributes};
+                        delete next[k];
+                        setCustomAttributes(next);
+                      }}
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+
             <button
               className="button primary"
               type="button"

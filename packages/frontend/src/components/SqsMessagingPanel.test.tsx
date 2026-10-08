@@ -45,7 +45,7 @@ describe("SqsMessagingPanel", () => {
     const sendButtons = screen.getAllByRole("button", {name: "Send"});
     await user.click(sendButtons[sendButtons.length - 1]);
 
-    expect(sendQueueMessage).toHaveBeenCalledWith("aws", "messaging", "orders-queue", "hello");
+    expect(sendQueueMessage).toHaveBeenCalledWith("aws", "messaging", "orders-queue", "hello", undefined);
     expect(await screen.findByText("msg-1")).toBeInTheDocument();
   });
 

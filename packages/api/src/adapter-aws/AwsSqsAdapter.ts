@@ -117,14 +117,23 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
         await this.sqs.send(new DeleteQueueCommand({QueueUrl: url}))
     }
 
-    async sendMessage(id: string, body: string): Promise<SendQueueMessageResult> {
+    async sendMessage(id: string, body: string, attributes?: Record<string, string>): Promise<SendQueueMessageResult> {
         const url = await this.requireQueueUrl(id)
+        
+        const MessageAttributes: Record<string, any> = {}
+        if (attributes) {
+            for (const [key, value] of Object.entries(attributes)) {
+                MessageAttributes[key] = { DataType: 'String', StringValue: value }
+            }
+        }
+
         // Real SQS requires MessageGroupId on every send to a FIFO queue. Derive
         // a default from the queue name so a FIFO send works without a form field.
         const res = await this.sqs.send(
             new SendMessageCommand({
                 QueueUrl: url,
                 MessageBody: body,
+                ...(Object.keys(MessageAttributes).length > 0 ? { MessageAttributes } : {}),
                 ...(isFifoName(id) ? {MessageGroupId: id.replace(/\.fifo$/, '')} : {}),
             }),
         )

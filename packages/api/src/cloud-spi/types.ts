@@ -581,7 +581,7 @@ export interface CloudServiceAdapter {
     invoke?(id: string, payload: string): Promise<ServerlessInvokeResult>
     encrypt?(id: string, input: KmsEncryptInput): Promise<KmsEncryptResult>
     decrypt?(id: string, input: KmsDecryptInput): Promise<KmsDecryptResult>
-    sendMessage?(id: string, body: string): Promise<SendQueueMessageResult>
+    sendMessage?(id: string, body: string, attributes?: Record<string, string>): Promise<SendQueueMessageResult>
     receiveMessages?(id: string, maxMessages?: number): Promise<QueueMessage[]>
     deleteMessage?(id: string, receiptHandle: string): Promise<void>
     purgeQueue?(id: string): Promise<void>
