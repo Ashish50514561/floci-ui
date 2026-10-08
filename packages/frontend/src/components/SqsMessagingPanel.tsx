@@ -202,6 +202,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 placeholder="Key"
                 value={attrKey}
                 onChange={(e) => setAttrKey(e.target.value)}
+                maxLength={256}
                 style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
               />
               <input
@@ -210,12 +211,14 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 placeholder="Value"
                 value={attrValue}
                 onChange={(e) => setAttrValue(e.target.value)}
+                maxLength={256}
                 style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
               />
               <button
                 className="button"
                 type="button"
-                disabled={!attrKey.trim() || !attrValue.trim()}
+                disabled={!attrKey.trim() || !attrValue.trim() || Object.keys(customAttributes).length >= 10}
+                title={Object.keys(customAttributes).length >= 10 ? "Maximum 10 attributes allowed" : ""}
                 onClick={() => {
                   setCustomAttributes(prev => ({...prev, [attrKey.trim()]: attrValue.trim()}));
                   setAttrKey("");

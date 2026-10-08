@@ -156,7 +156,7 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
             }),
         )
 
-        return (res.Messages ?? []).map((message) => {
+        const parsed = (res.Messages ?? []).map((message) => {
             const messageAttributes: Record<string, string> = {}
             if (message.MessageAttributes) {
                 for (const [key, value] of Object.entries(message.MessageAttributes)) {
@@ -172,6 +172,7 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
                 md5OfBody: message.MD5OfBody,
             }
         })
+        return parsed;
     }
 
     async deleteMessage(id: string, receiptHandle: string): Promise<void> {

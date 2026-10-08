@@ -268,7 +268,19 @@ describe('AwsSqsAdapter', () => {
         expect(send.input.QueueUrl).toBe(`${BASE}/orders-queue`)
         expect(send.input.MessageBody).toBe('hello')
         expect(send.input.MessageGroupId).toBeUndefined()
+        expect(send.input.MessageAttributes).toBeUndefined()
         expect(result).toEqual({messageId: 'msg-1', md5OfMessageBody: 'abc123'})
+    })
+
+    test('maps custom attributes to MessageAttributes when sending a message', async () => {
+        const {client, sent} = stubSqs()
+        await new AwsSqsAdapter(client).sendMessage('orders-queue', 'hello', { foo: 'bar', baz: 'qux' })
+
+        const send = sent[1] as SendMessageCommand
+        expect(send.input.MessageAttributes).toEqual({
+            foo: { DataType: 'String', StringValue: 'bar' },
+            baz: { DataType: 'String', StringValue: 'qux' },
+        })
     })
 
     test('sets MessageGroupId when sending to a FIFO queue', async () => {
