@@ -189,6 +189,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 id="sqs-message-body"
                 className="json-editor"
                 value={body}
+                disabled={sending}
                 onChange={(event) => setBody(event.target.value)}
                 spellCheck={false}
                 placeholder="Message body"
@@ -205,6 +206,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                   placeholder="Key"
                   value={attrKey}
                   onChange={(e) => setAttrKey(e.target.value)}
+                  disabled={sending}
                   maxLength={256}
                   style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
                 />
@@ -214,12 +216,13 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 placeholder="Value"
                 value={attrValue}
                 onChange={(e) => setAttrValue(e.target.value)}
+                disabled={sending}
                 style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
               />
               <button
                 className="button"
                 type="button"
-                disabled={!attrKey.trim() || !attrValue.trim() || Object.keys(customAttributes).length >= 10}
+                disabled={!attrKey.trim() || !attrValue.trim() || Object.keys(customAttributes).length >= 10 || sending}
                 title={Object.keys(customAttributes).length >= 10 ? "Maximum 10 attributes allowed" : ""}
                 onClick={() => {
                   setCustomAttributes(prev => Object.fromEntries(
@@ -240,6 +243,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                     <button
                       className="button"
                       type="button"
+                      disabled={sending}
                       aria-label="Remove attribute"
                       style={{padding: "2px 4px", minWidth: "unset"}}
                       onClick={() => {
