@@ -348,7 +348,8 @@ describe('AwsSqsAdapter', () => {
                 // Simulate an SDK return where a prototype key or a malformed entry has an undefined value
                 MessageAttributes: {
                     valid: {DataType: 'String', StringValue: 'present'},
-                    __proto__: undefined as any,
+                    ['__proto__']: undefined as any,
+                    malformed: undefined as any,
                 },
             }],
         })
