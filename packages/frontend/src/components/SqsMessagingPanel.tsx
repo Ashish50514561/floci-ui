@@ -214,7 +214,6 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 placeholder="Value"
                 value={attrValue}
                 onChange={(e) => setAttrValue(e.target.value)}
-                maxLength={256}
                 style={{flex: 1, cursor: "text", padding: "4px 8px", minHeight: 32}}
               />
               <button
@@ -223,7 +222,9 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 disabled={!attrKey.trim() || !attrValue.trim() || Object.keys(customAttributes).length >= 10}
                 title={Object.keys(customAttributes).length >= 10 ? "Maximum 10 attributes allowed" : ""}
                 onClick={() => {
-                  setCustomAttributes(prev => ({...prev, [attrKey.trim()]: attrValue.trim()}));
+                  setCustomAttributes(prev => Object.fromEntries(
+                    Object.entries(prev).concat([[attrKey.trim(), attrValue]])
+                  ));
                   setAttrKey("");
                   setAttrValue("");
                 }}
@@ -239,11 +240,12 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                     <button
                       className="button"
                       type="button"
+                      aria-label="Remove attribute"
                       style={{padding: "2px 4px", minWidth: "unset"}}
                       onClick={() => {
-                        const next = {...customAttributes};
-                        delete next[k];
-                        setCustomAttributes(next);
+                        setCustomAttributes(prev => Object.fromEntries(
+                          Object.entries(prev).filter(([key]) => key !== k)
+                        ));
                       }}
                     >
                       <Trash2 size={11} />

@@ -283,6 +283,19 @@ describe('AwsSqsAdapter', () => {
         })
     })
 
+    test('safely maps __proto__ attribute without prototype pollution', async () => {
+        const {client, sent} = stubSqs()
+        // @ts-expect-error - deliberate prototype pollution test
+        const attributes = JSON.parse('{"__proto__": "polluted", "valid": "data"}')
+        await new AwsSqsAdapter(client).sendMessage('orders-queue', 'hello', attributes)
+
+        const send = sent[1] as SendMessageCommand
+        expect(send.input.MessageAttributes).toHaveProperty('__proto__')
+        expect(send.input.MessageAttributes?.['__proto__']).toEqual({ DataType: 'String', StringValue: 'polluted' })
+        expect(send.input.MessageAttributes).toHaveProperty('valid')
+        expect(send.input.MessageAttributes?.['valid']).toEqual({ DataType: 'String', StringValue: 'data' })
+    })
+
     test('sets MessageGroupId when sending to a FIFO queue', async () => {
         const {client, sent} = stubSqs()
         await new AwsSqsAdapter(client).sendMessage('orders.fifo', 'hello')

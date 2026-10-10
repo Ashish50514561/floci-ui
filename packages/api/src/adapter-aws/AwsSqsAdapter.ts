@@ -120,12 +120,14 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
     async sendMessage(id: string, body: string, attributes?: Record<string, string>): Promise<SendQueueMessageResult> {
         const url = await this.requireQueueUrl(id)
         
-        const MessageAttributes: Record<string, any> = {}
-        if (attributes) {
-            for (const [key, value] of Object.entries(attributes)) {
-                MessageAttributes[key] = { DataType: 'String', StringValue: value }
-            }
-        }
+        const MessageAttributes: Record<string, any> = attributes
+            ? Object.fromEntries(
+                Object.entries(attributes).map(([key, value]) => [
+                    key,
+                    { DataType: 'String', StringValue: value }
+                ])
+              )
+            : {}
 
         // Real SQS requires MessageGroupId on every send to a FIFO queue. Derive
         // a default from the queue name so a FIFO send works without a form field.
@@ -157,12 +159,14 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
         )
 
         const parsed = (res.Messages ?? []).map((message) => {
-            const messageAttributes: Record<string, string> = {}
-            if (message.MessageAttributes) {
-                for (const [key, value] of Object.entries(message.MessageAttributes)) {
-                    messageAttributes[key] = value.StringValue ?? '<Binary Data>'
-                }
-            }
+            const messageAttributes: Record<string, string> = message.MessageAttributes
+                ? Object.fromEntries(
+                    Object.entries(message.MessageAttributes).map(([key, value]) => [
+                        key,
+                        value.StringValue ?? '<Binary Data>'
+                    ])
+                  )
+                : {}
             return {
                 messageId: message.MessageId ?? '',
                 body: message.Body ?? '',
