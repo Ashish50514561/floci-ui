@@ -339,6 +339,25 @@ describe('AwsSqsAdapter', () => {
         })
     })
 
+    test('skips entries with undefined values when mapping received MessageAttributes', async () => {
+        const {client} = stubSqs({
+            messages: [{
+                MessageId: 'msg-3',
+                Body: 'test undefined',
+                ReceiptHandle: 'handle-3',
+                // Simulate an SDK return where a prototype key or a malformed entry has an undefined value
+                MessageAttributes: {
+                    valid: {DataType: 'String', StringValue: 'present'},
+                    __proto__: undefined as any,
+                },
+            }],
+        })
+        const messages = await new AwsSqsAdapter(client).receiveMessages('orders-queue')
+        expect(messages[0].messageAttributes).toEqual({
+            valid: 'present',
+        })
+    })
+
     test('clamps maxMessages to the SQS-documented 1-10 range', async () => {
         const {client, sent} = stubSqs()
         await new AwsSqsAdapter(client).receiveMessages('orders-queue', 50)

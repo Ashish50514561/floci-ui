@@ -161,10 +161,12 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
         const parsed = (res.Messages ?? []).map((message) => {
             const messageAttributes: Record<string, string> = message.MessageAttributes
                 ? Object.fromEntries(
-                    Object.entries(message.MessageAttributes).map(([key, value]) => [
-                        key,
-                        value.StringValue ?? '<Binary Data>'
-                    ])
+                    Object.entries(message.MessageAttributes)
+                        .filter(([_, value]) => value !== undefined)
+                        .map(([key, value]) => [
+                            key,
+                            value!.StringValue ?? '<Binary Data>'
+                        ])
                   )
                 : {}
             return {
