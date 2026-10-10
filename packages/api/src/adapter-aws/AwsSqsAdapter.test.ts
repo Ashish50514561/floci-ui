@@ -285,7 +285,6 @@ describe('AwsSqsAdapter', () => {
 
     test('safely maps __proto__ attribute without prototype pollution', async () => {
         const {client, sent} = stubSqs()
-        // @ts-expect-error - deliberate prototype pollution test
         const attributes = JSON.parse('{"__proto__": "polluted", "valid": "data"}')
         await new AwsSqsAdapter(client).sendMessage('orders-queue', 'hello', attributes)
 
