@@ -13,6 +13,7 @@ import {
 } from '@aws-sdk/client-sqs'
 import {AwsSqsAdapter} from './AwsSqsAdapter'
 import {NotFoundError, ValidationError} from '../cloud-spi/errors'
+import {awsMessagingSchema} from '../cloud-spi/messagingSchema'
 
 const BASE = 'http://localhost:4566/000000000000'
 
@@ -101,6 +102,17 @@ describe('AwsSqsAdapter', () => {
         expect(resource?.metadata.approximateMessages).toBe(4)
         expect(resource?.metadata.messagesInFlight).toBe(1)
         expect(resource?.metadata.visibilityTimeout).toBe(30)
+        expect(resource?.metadata.messageRetentionPeriod).toBe(345600)
+        expect(resource?.metadata.maximumMessageSize).toBe(1048576)
+        expect(resource?.metadata.delaySeconds).toBe(0)
+    })
+
+    test('normalizes receiveMessageWaitTimeSeconds when present', async () => {
+        const {client} = stubSqs({
+            attributes: {...ORDERS_ATTRIBUTES, ReceiveMessageWaitTimeSeconds: '15'},
+        })
+        const [resource] = await new AwsSqsAdapter(client).list()
+        expect(resource?.metadata.receiveMessageWaitTimeSeconds).toBe(15)
     })
 
     test('converts SQS epoch-second timestamps to ISO', async () => {
@@ -160,13 +172,81 @@ describe('AwsSqsAdapter', () => {
     test('creates a queue with optional attributes', async () => {
         const {client, sent} = stubSqs()
         await new AwsSqsAdapter(client).create({
-            values: {queueName: 'orders-queue', visibilityTimeout: '60', messageRetentionPeriod: '600'},
+            values: {
+                queueName: 'orders-queue',
+                visibilityTimeout: '60',
+                messageRetentionPeriod: '600',
+                delaySeconds: '10',
+                maximumMessageSize: '65536',
+                receiveMessageWaitTimeSeconds: '5',
+            },
         })
 
         const command = sent[0] as CreateQueueCommand
         expect(command).toBeInstanceOf(CreateQueueCommand)
         expect(command.input.QueueName).toBe('orders-queue')
-        expect(command.input.Attributes).toEqual({VisibilityTimeout: '60', MessageRetentionPeriod: '600'})
+        expect(command.input.Attributes).toEqual({
+            VisibilityTimeout: '60',
+            MessageRetentionPeriod: '600',
+            DelaySeconds: '10',
+            MaximumMessageSize: '65536',
+            ReceiveMessageWaitTimeSeconds: '5',
+        })
+    })
+
+    test('resolves maximumMessageSize from KB (schema field) and bytes or units (direct calls)', async () => {
+        // UI field maximumMessageSizeKb
+        const {client: client1, sent: sent1} = stubSqs()
+        await new AwsSqsAdapter(client1).create({
+            values: {
+                queueName: 'orders-queue',
+                maximumMessageSizeKb: '1',
+            },
+        })
+        const cmd1 = sent1.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(cmd1.input.Attributes?.MaximumMessageSize).toBe('1024')
+
+        const {client: client2, sent: sent2} = stubSqs()
+        await new AwsSqsAdapter(client2).create({
+            values: {
+                queueName: 'orders-queue',
+                maximumMessageSizeKb: '1024',
+            },
+        })
+        const cmd2 = sent2.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(cmd2.input.Attributes?.MaximumMessageSize).toBe('1048576')
+
+        // Direct API call: raw bytes without unit (1024 means 1024 bytes / 1 KiB, not 1 MiB)
+        const {client: client3, sent: sent3} = stubSqs()
+        await new AwsSqsAdapter(client3).create({
+            values: {
+                queueName: 'orders-queue',
+                maximumMessageSize: '1024',
+            },
+        })
+        const cmd3 = sent3.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(cmd3.input.Attributes?.MaximumMessageSize).toBe('1024')
+
+        // Direct API call: explicit units
+        const {client: client4, sent: sent4} = stubSqs()
+        await new AwsSqsAdapter(client4).create({
+            values: {
+                queueName: 'orders-queue',
+                maximumMessageSize: '1024 KB',
+            },
+        })
+        const cmd4 = sent4.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(cmd4.input.Attributes?.MaximumMessageSize).toBe('1048576')
+
+        const {client: client5, sent: sent5} = stubSqs()
+        await new AwsSqsAdapter(client5).create({
+            values: {
+                queueName: 'orders-queue',
+                maximumMessageSize: '1MB',
+            },
+        })
+        const cmd5 = sent5.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(cmd5.input.Attributes?.MaximumMessageSize).toBe('1048576')
     })
 
     test('omits the attributes block when nothing was supplied', async () => {
@@ -245,17 +325,117 @@ describe('AwsSqsAdapter', () => {
         await expect(
             adapter.create({values: {queueName: 'q', messageRetentionPeriod: '59'}}),
         ).rejects.toThrow(ValidationError)
+        await expect(
+            adapter.create({values: {queueName: 'q', delaySeconds: '901'}}),
+        ).rejects.toThrow(ValidationError)
+        await expect(
+            adapter.create({values: {queueName: 'q', maximumMessageSizeKb: '0'}}),
+        ).rejects.toThrow('maximumMessageSizeKb must be between 1 and 1024 KB.')
+        await expect(
+            adapter.create({values: {queueName: 'q', maximumMessageSizeKb: '1025'}}),
+        ).rejects.toThrow('maximumMessageSizeKb must be between 1 and 1024 KB.')
+        await expect(
+            adapter.create({values: {queueName: 'q', maximumMessageSize: '1023'}}),
+        ).rejects.toThrow('maximumMessageSize must be between 1024 and 1048576 bytes.')
+        await expect(
+            adapter.create({values: {queueName: 'q', maximumMessageSize: '1048577'}}),
+        ).rejects.toThrow('maximumMessageSize must be between 1024 and 1048576 bytes.')
+        await expect(
+            adapter.create({values: {queueName: 'q', maximumMessageSize: 'invalid'}}),
+        ).rejects.toThrow('maximumMessageSize must be a whole number of bytes between 1024 and 1048576.')
+        await expect(
+            adapter.create({values: {queueName: 'q', receiveMessageWaitTimeSeconds: '21'}}),
+        ).rejects.toThrow(ValidationError)
     })
 
-    test('accepts attributes inside the SQS range and omits blanks', async () => {
-        const {client, sent} = stubSqs()
-
-        await new AwsSqsAdapter(client).create({
-            values: {queueName: 'q', visibilityTimeout: '30', messageRetentionPeriod: ''},
+    test('accepts attributes at min and max SQS boundaries and omits blanks', async () => {
+        // Min boundaries
+        const {client: minClient, sent: minSent} = stubSqs()
+        await new AwsSqsAdapter(minClient).create({
+            values: {
+                queueName: 'min-queue',
+                visibilityTimeout: '0',
+                messageRetentionPeriod: '60',
+                delaySeconds: '0',
+                maximumMessageSizeKb: '1',
+                receiveMessageWaitTimeSeconds: '0',
+            },
+        })
+        const minCommand = minSent.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(minCommand.input.Attributes).toEqual({
+            VisibilityTimeout: '0',
+            MessageRetentionPeriod: '60',
+            DelaySeconds: '0',
+            MaximumMessageSize: '1024',
+            ReceiveMessageWaitTimeSeconds: '0',
         })
 
-        const create = sent.find((command) => command instanceof CreateQueueCommand)
-        expect(create?.input.Attributes).toEqual({VisibilityTimeout: '30'})
+        // Max boundaries
+        const {client: maxClient, sent: maxSent} = stubSqs()
+        await new AwsSqsAdapter(maxClient).create({
+            values: {
+                queueName: 'max-queue',
+                visibilityTimeout: '43200',
+                messageRetentionPeriod: '1209600',
+                delaySeconds: '900',
+                maximumMessageSizeKb: '1024',
+                receiveMessageWaitTimeSeconds: '20',
+            },
+        })
+        const maxCommand = maxSent.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(maxCommand.input.Attributes).toEqual({
+            VisibilityTimeout: '43200',
+            MessageRetentionPeriod: '1209600',
+            DelaySeconds: '900',
+            MaximumMessageSize: '1048576',
+            ReceiveMessageWaitTimeSeconds: '20',
+        })
+
+        // Omit blanks
+        const {client: blankClient, sent: blankSent} = stubSqs()
+        await new AwsSqsAdapter(blankClient).create({
+            values: {queueName: 'blank-queue', visibilityTimeout: '30', messageRetentionPeriod: ''},
+        })
+        const blankCommand = blankSent.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
+        expect(blankCommand.input.Attributes).toEqual({VisibilityTimeout: '30'})
+    })
+
+    test('enforces exact min and max validation patterns on all queue creation fields in schema', () => {
+        const schema = awsMessagingSchema()
+        const field = (name: string) => schema.fields.find((f) => f.name === name)!
+
+        // VisibilityTimeout: 0 to 43200
+        const vtPattern = new RegExp(field('visibilityTimeout').validation!.pattern!)
+        expect(vtPattern.test('0')).toBe(true)
+        expect(vtPattern.test('43200')).toBe(true)
+        expect(vtPattern.test('43201')).toBe(false)
+        expect(vtPattern.test('-1')).toBe(false)
+
+        // MessageRetentionPeriod: 60 to 1209600
+        const retPattern = new RegExp(field('messageRetentionPeriod').validation!.pattern!)
+        expect(retPattern.test('59')).toBe(false)
+        expect(retPattern.test('60')).toBe(true)
+        expect(retPattern.test('1209600')).toBe(true)
+        expect(retPattern.test('1209601')).toBe(false)
+
+        // DelaySeconds: 0 to 900
+        const delayPattern = new RegExp(field('delaySeconds').validation!.pattern!)
+        expect(delayPattern.test('0')).toBe(true)
+        expect(delayPattern.test('900')).toBe(true)
+        expect(delayPattern.test('901')).toBe(false)
+
+        // MaximumMessageSize: 1 to 1024 KB
+        const sizePattern = new RegExp(field('maximumMessageSizeKb').validation!.pattern!)
+        expect(sizePattern.test('0')).toBe(false)
+        expect(sizePattern.test('1')).toBe(true)
+        expect(sizePattern.test('1024')).toBe(true)
+        expect(sizePattern.test('1025')).toBe(false)
+
+        // ReceiveMessageWaitTimeSeconds: 0 to 20
+        const waitPattern = new RegExp(field('receiveMessageWaitTimeSeconds').validation!.pattern!)
+        expect(waitPattern.test('0')).toBe(true)
+        expect(waitPattern.test('20')).toBe(true)
+        expect(waitPattern.test('21')).toBe(false)
     })
 
     test('sends a message by resolving the queue URL first', async () => {
@@ -317,6 +497,7 @@ describe('AwsSqsAdapter', () => {
         const receive = sent[1] as ReceiveMessageCommand
         expect(receive).toBeInstanceOf(ReceiveMessageCommand)
         expect(receive.input.VisibilityTimeout).toBe(0)
+        expect(receive.input.WaitTimeSeconds).toBe(0)
         expect(messages).toEqual([{messageId: 'msg-1', body: 'hello', receiptHandle: 'handle-1', attributes: undefined, messageAttributes: undefined, md5OfBody: undefined}])
     })
 
