@@ -303,27 +303,6 @@ export function createCloudRoutes(injectedService?: CloudProxyService) {
         })
     })
 
-    app.get('/:cloud/services/nosql/resources/:id/items', async (c) => {
-        const cloud = c.req.param('cloud') as CloudProvider
-        if (!isCloudProvider(cloud)) throw new NotFoundError('Unknown cloud')
-
-        return withRuntime(c, async () => {
-            const items = await svc(c).listNoSqlItems(cloud, c.req.param('id'))
-            return c.json(items)
-        })
-    })
-
-    app.post('/:cloud/services/nosql/resources/:id/items', async (c) => {
-        const cloud = c.req.param('cloud') as CloudProvider
-        if (!isCloudProvider(cloud)) throw new NotFoundError('Unknown cloud')
-
-        return withRuntime(c, async () => {
-            const document = await c.req.json<Record<string, unknown>>()
-            const item = await svc(c).putNoSqlItem(cloud, c.req.param('id'), document)
-            return c.json(item, 201)
-        })
-    })
-
     app.delete('/:cloud/services/email/inbox', async (c) => {
         const cloud = c.req.param('cloud') as CloudProvider
         if (!isCloudProvider(cloud)) throw new NotFoundError('Unknown cloud')
@@ -659,8 +638,8 @@ export function createCloudRoutes(injectedService?: CloudProxyService) {
         if (!target) throw new NotFoundError('Unknown cloud or service')
 
         return withRuntime(c, async () => {
-            const body = await c.req.json<{query?: string}>()
-            const page = await svc(c).queryCollectionItems(target.cloud, target.service, c.req.param('id'), c.req.param('cid'), body.query ?? '')
+            const body = await c.req.json<QueryBody>()
+            const page = await svc(c).queryCollectionItems(target.cloud, target.service, c.req.param('id'), c.req.param('cid'), body.query ?? '', bodyPageQuery(body))
             return c.json(page)
         })
     })
@@ -701,8 +680,8 @@ export function createCloudRoutes(injectedService?: CloudProxyService) {
         if (!target) throw new NotFoundError('Unknown cloud or service')
 
         return withRuntime(c, async () => {
-            const body = await c.req.json<{query?: string}>()
-            const page = await svc(c).queryFlatItems(target.cloud, target.service, c.req.param('id'), body.query ?? '')
+            const body = await c.req.json<QueryBody>()
+            const page = await svc(c).queryFlatItems(target.cloud, target.service, c.req.param('id'), body.query ?? '', bodyPageQuery(body))
             return c.json(page)
         })
     })
@@ -1028,6 +1007,24 @@ function childTarget(c: Context): {cloud: CloudProvider; service: CloudServiceTy
 /** Parse paging params. An out-of-range limit raises and becomes a 400. */
 function pageQuery(c: Context): PageQuery {
     return {cursor: c.req.query('cursor'), limit: clampLimit(c.req.query('limit'))}
+}
+
+interface QueryBody {
+    query?: string
+    cursor?: unknown
+    limit?: unknown
+}
+
+// A query travels in the body, so its continuation does too: a cursor in the
+// URL would sit next to a statement it is not valid for.
+function bodyPageQuery(body: QueryBody): PageQuery {
+    if (body.cursor !== undefined && body.cursor !== null && typeof body.cursor !== 'string') {
+        throw new ValidationError('cursor must be a string.')
+    }
+    if (body.limit !== undefined && body.limit !== null && typeof body.limit !== 'number') {
+        throw new ValidationError('limit must be a number.')
+    }
+    return {cursor: body.cursor || undefined, limit: clampLimit(typeof body.limit === 'number' ? String(body.limit) : undefined)}
 }
 
 async function withRuntime(c: Context, handler: () => Promise<Response>): Promise<Response> {
