@@ -186,6 +186,9 @@ export function ResourceInspector({
   const isAwsDatabase = isDatabase && resource.cloud === "aws";
   const isK8sEngine = resource.service === "k8s" || resource.type === "cluster";
   const isLogGroup = resource.cloud === "aws" && (resource.service === "logs" || resource.type === "log-group");
+  const isSqsQueue =
+    resource.cloud === "aws" &&
+    (resource.service === "messaging" || resource.type === "queue" || resource.type === "fifo-queue");
 
   return (
     <aside className="resource-inspector">
@@ -355,6 +358,69 @@ export function ResourceInspector({
                     getNumberMetadata(resource.metadata.timeout) === null
                       ? "-"
                       : `${getNumberMetadata(resource.metadata.timeout)}s`
+                  }
+                />
+              </div>
+            </section>
+          )}
+          {isSqsQueue && (
+            <section className="inspector-section">
+              <p className="metric-label">Queue Details</p>
+              <div className="inspector-grid compact-grid">
+                <InspectorItem
+                  label="Visibility Timeout"
+                  value={
+                    getNumberMetadata(resource.metadata.visibilityTimeout) !== null
+                      ? `${getNumberMetadata(resource.metadata.visibilityTimeout)}s`
+                      : "-"
+                  }
+                />
+                <InspectorItem
+                  label="Retention Period"
+                  value={
+                    getNumberMetadata(resource.metadata.messageRetentionPeriod) !== null
+                      ? `${getNumberMetadata(resource.metadata.messageRetentionPeriod)}s`
+                      : "-"
+                  }
+                />
+                <InspectorItem
+                  label="Delivery Delay"
+                  value={
+                    getNumberMetadata(resource.metadata.delaySeconds) !== null
+                      ? `${getNumberMetadata(resource.metadata.delaySeconds)}s`
+                      : "-"
+                  }
+                />
+                <InspectorItem
+                  label="Max Message Size"
+                  value={
+                    getNumberMetadata(resource.metadata.maximumMessageSize) !== null
+                      ? formatBytes(getNumberMetadata(resource.metadata.maximumMessageSize)!)
+                      : "-"
+                  }
+                />
+                <InspectorItem
+                  label="Receive Wait Time"
+                  value={
+                    getNumberMetadata(resource.metadata.receiveMessageWaitTimeSeconds) !== null
+                      ? `${getNumberMetadata(resource.metadata.receiveMessageWaitTimeSeconds)}s`
+                      : "-"
+                  }
+                />
+                <InspectorItem
+                  label="Messages in Flight"
+                  value={
+                    getNumberMetadata(resource.metadata.messagesInFlight) !== null
+                      ? `${getNumberMetadata(resource.metadata.messagesInFlight)}`
+                      : "-"
+                  }
+                />
+                <InspectorItem
+                  label="Messages Delayed"
+                  value={
+                    getNumberMetadata(resource.metadata.messagesDelayed) !== null
+                      ? `${getNumberMetadata(resource.metadata.messagesDelayed)}`
+                      : "-"
                   }
                 />
               </div>

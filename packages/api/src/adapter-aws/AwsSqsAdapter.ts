@@ -42,6 +42,7 @@ interface QueueAttributes {
     MessageRetentionPeriod?: string
     MaximumMessageSize?: string
     DelaySeconds?: string
+    ReceiveMessageWaitTimeSeconds?: string
     CreatedTimestamp?: string
     LastModifiedTimestamp?: string
     FifoQueue?: string
@@ -94,8 +95,19 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
         // 400 from the runtime several seconds later.
         const visibilityTimeout = numericAttribute(input.values.visibilityTimeout, 'visibilityTimeout', 0, 43_200)
         const retention = numericAttribute(input.values.messageRetentionPeriod, 'messageRetentionPeriod', 60, 1_209_600)
+        const delaySeconds = numericAttribute(input.values.delaySeconds, 'delaySeconds', 0, 900)
+        const maxMessageSize = resolveMaximumMessageSize(input.values)
+        const receiveWaitTime = numericAttribute(
+            input.values.receiveMessageWaitTimeSeconds,
+            'receiveMessageWaitTimeSeconds',
+            0,
+            20,
+        )
         if (visibilityTimeout) attributes.VisibilityTimeout = visibilityTimeout
         if (retention) attributes.MessageRetentionPeriod = retention
+        if (delaySeconds) attributes.DelaySeconds = delaySeconds
+        if (maxMessageSize) attributes.MaximumMessageSize = maxMessageSize
+        if (receiveWaitTime) attributes.ReceiveMessageWaitTimeSeconds = receiveWaitTime
         // A .fifo name alone is not enough: real SQS rejects the create unless
         // FifoQueue is set. Floci core infers it from the suffix, so omitting it
         // works locally and then fails against AWS.
@@ -154,6 +166,10 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
                 // stay available in the queue instead of being hidden for the
                 // queue's default visibility period.
                 VisibilityTimeout: 0,
+                // WaitTimeSeconds 0 ensures this peek returns immediately with whatever
+                // messages are currently available, instead of inheriting ReceiveMessageWaitTimeSeconds
+                // (which can be up to 20s and outlast browser request timeouts).
+                WaitTimeSeconds: 0,
                 MessageSystemAttributeNames: ['All'],
                 MessageAttributeNames: ['All'],
             }),
@@ -243,6 +259,7 @@ function toResource(name: string, url: string, attributes: QueueAttributes): Clo
             messageRetentionPeriod: numberValue(attributes.MessageRetentionPeriod),
             maximumMessageSize: numberValue(attributes.MaximumMessageSize),
             delaySeconds: numberValue(attributes.DelaySeconds),
+            receiveMessageWaitTimeSeconds: numberValue(attributes.ReceiveMessageWaitTimeSeconds),
             lastModified: epochSecondsToIso(attributes.LastModifiedTimestamp),
         },
     }
@@ -275,17 +292,61 @@ function stringValue(value: unknown): string {
  * Returns '' when the caller left it blank — these are optional, and an empty
  * field must not become an attribute.
  */
-function numericAttribute(value: unknown, field: string, min: number, max: number): string {
+function numericAttribute(value: unknown, field: string, min: number, max: number, unit = 'seconds'): string {
     const raw = stringValue(value)
     if (!raw) return ''
     if (!/^\d+$/.test(raw)) {
-        throw new ValidationError(`${field} must be a whole number of seconds between ${min} and ${max}.`)
+        throw new ValidationError(`${field} must be a whole number of ${unit} between ${min} and ${max}.`)
     }
     const parsed = Number(raw)
     if (parsed < min || parsed > max) {
-        throw new ValidationError(`${field} must be between ${min} and ${max} seconds.`)
+        throw new ValidationError(`${field} must be between ${min} and ${max} ${unit}.`)
     }
     return raw
+}
+
+/**
+ * Validate and normalize maximumMessageSize according to AWS SQS quotas:
+ * 1,024 bytes (1 KiB) up to 1,048,576 bytes (1 MiB / 1,024 KiB).
+ *
+ * Accepts either:
+ * - `maximumMessageSizeKb`: A value in KB between 1 and 1,024 (as configured in the schema), converting it to bytes.
+ * - `maximumMessageSize`: Raw byte count (1,024 - 1,048,576) or with explicit unit (e.g., '1024 B', '256 KB', '1 MB', '1024 KiB').
+ *
+ * Returns '' when blank.
+ */
+function resolveMaximumMessageSize(values: Record<string, unknown>): string {
+    const rawKb = stringValue(values.maximumMessageSizeKb)
+    if (rawKb) {
+        const kb = numericAttribute(rawKb, 'maximumMessageSizeKb', 1, 1024, 'KB')
+        return String(Number(kb) * 1024)
+    }
+
+    const raw = stringValue(values.maximumMessageSize)
+    if (!raw) return ''
+
+    const unitMatch = raw.match(/^(\d+)\s*(b|bytes?|kb|kib|mb|mib)$/i)
+    if (unitMatch) {
+        const amount = Number(unitMatch[1])
+        const unit = unitMatch[2].toLowerCase()
+        let bytes: number
+        if (unit.startsWith('m')) bytes = amount * 1024 * 1024
+        else if (unit.startsWith('k')) bytes = amount * 1024
+        else bytes = amount
+        if (bytes < 1024 || bytes > 1_048_576) {
+            throw new ValidationError('maximumMessageSize must be between 1024 bytes (1 KB) and 1048576 bytes (1 MB).')
+        }
+        return String(bytes)
+    }
+
+    if (!/^\d+$/.test(raw)) {
+        throw new ValidationError('maximumMessageSize must be a whole number of bytes between 1024 and 1048576.')
+    }
+    const bytes = Number(raw)
+    if (bytes < 1024 || bytes > 1_048_576) {
+        throw new ValidationError('maximumMessageSize must be between 1024 and 1048576 bytes.')
+    }
+    return String(bytes)
 }
 
 function filterBySearch(resources: CloudResource[], search?: string): CloudResource[] {

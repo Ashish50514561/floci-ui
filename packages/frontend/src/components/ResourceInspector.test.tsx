@@ -521,4 +521,35 @@ describe('ResourceInspector Lambda Header and Triggers', () => {
         expect(screen.getByRole('tab', {name: 'JSON'})).toHaveFocus()
         expect(screen.getByRole('tabpanel', {name: 'JSON'})).toBeInTheDocument()
     })
+
+    test('renders SQS queue configuration details in plain text tab', () => {
+        const sqsQueue: CloudResource = {
+            id: 'orders-queue',
+            name: 'orders-queue',
+            cloud: 'aws',
+            service: 'messaging',
+            type: 'queue',
+            region: null,
+            createdAt: '2026-10-13T12:00:00.000Z',
+            metadata: {
+                arn: 'arn:aws:sqs:us-east-1:000000000000:orders-queue',
+                visibilityTimeout: 45,
+                messageRetentionPeriod: 86400,
+                delaySeconds: 10,
+                maximumMessageSize: 262144,
+                receiveMessageWaitTimeSeconds: 20,
+                messagesInFlight: 2,
+                messagesDelayed: 0,
+            },
+        }
+
+        renderWithClient(<ResourceInspector resource={sqsQueue} cloud="aws" runtimeReachable={true} />)
+
+        expect(screen.getByText('Queue Details')).toBeInTheDocument()
+        expect(screen.getByText('45s')).toBeInTheDocument()
+        expect(screen.getByText('86400s')).toBeInTheDocument()
+        expect(screen.getByText('10s')).toBeInTheDocument()
+        expect(screen.getByText('20s')).toBeInTheDocument()
+        expect(screen.getByText('256.0 KB')).toBeInTheDocument()
+    })
 })
