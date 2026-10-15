@@ -49,8 +49,6 @@ const SQL_DATA_TIMEOUT_MS = 45_000;
 const LOGS_QUERY_TIMEOUT_MS = 20_000;
 /** Cold starts pull a container image; measured at ~60s on a first invoke. */
 const INVOKE_TIMEOUT_MS = 120_000;
-/** SQS long polling can wait up to 20s if WaitTimeSeconds is inherited. */
-const SQS_RECEIVE_TIMEOUT_MS = 25_000;
 
 export async function listClouds(
   signal?: AbortSignal,
@@ -332,11 +330,7 @@ export async function receiveQueueMessages(
 ): Promise<QueueMessage[]> {
   const res = await apiClient.call<{ messages: QueueMessage[] }>(
     apiEndpointKeys.clouds.resources.receiveMessages,
-    requestOptions(cloud, service, {
-      signal,
-      params: { maxMessages },
-      timeout: SQS_RECEIVE_TIMEOUT_MS,
-    }),
+    requestOptions(cloud, service, { signal, params: { maxMessages } }),
     { cloud, service, id },
   );
   return res.data.messages;
