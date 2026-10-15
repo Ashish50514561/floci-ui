@@ -9,11 +9,12 @@ import {
     PurgeQueueCommand,
     ReceiveMessageCommand,
     SendMessageCommand,
+    SetQueueAttributesCommand,
     type SQSClient,
 } from '@aws-sdk/client-sqs'
 import {AwsSqsAdapter} from './AwsSqsAdapter'
 import {NotFoundError, ValidationError} from '../cloud-spi/errors'
-import {awsMessagingSchema} from '../cloud-spi/messagingSchema'
+import {awsMessagingSchema, sqsValidations} from '../cloud-spi/messagingSchema'
 
 const BASE = 'http://localhost:4566/000000000000'
 
@@ -68,6 +69,9 @@ function stubSqs(handlers: {
             if (command instanceof ReceiveMessageCommand) {
                 return {Messages: handlers.messages ?? []}
             }
+            if (command instanceof SetQueueAttributesCommand) {
+                return {}
+            }
             return {}
         },
     } as unknown as SQSClient
@@ -80,6 +84,26 @@ describe('AwsSqsAdapter', () => {
         expect(adapter.cloud).toBe('aws')
         expect(adapter.service).toBe('messaging')
         expect(adapter.schema().displayName).toBe('AWS SQS')
+    })
+
+    test('declares update in schema actions, capabilities, and updateFields with shared validations', () => {
+        const schema = new AwsSqsAdapter(stubSqs().client).schema()
+        expect(schema.actions).toContain('update')
+        expect(schema.capabilities?.resourceActions?.some((a) => a.name === 'update')).toBe(true)
+        expect(schema.updateFields?.map((f) => f.name)).toEqual([
+            'visibilityTimeout',
+            'messageRetentionPeriod',
+            'delaySeconds',
+            'maximumMessageSizeKb',
+            'receiveMessageWaitTimeSeconds',
+        ])
+        for (const updateField of schema.updateFields ?? []) {
+            const createField = schema.fields.find((f) => f.name === updateField.name)
+            expect(createField).toBeDefined()
+            expect(updateField.validation).toBe(createField?.validation)
+            expect(updateField.validation).toBe(sqsValidations[updateField.name as keyof typeof sqsValidations])
+            expect(updateField.valuePath).toBe(`metadata.${updateField.name}`)
+        }
     })
 
     test('uses the queue name as the id, not the URL', async () => {
@@ -113,6 +137,15 @@ describe('AwsSqsAdapter', () => {
         })
         const [resource] = await new AwsSqsAdapter(client).list()
         expect(resource?.metadata.receiveMessageWaitTimeSeconds).toBe(15)
+    })
+
+    test('normalizes maximumMessageSizeKb in resource metadata', async () => {
+        const {client} = stubSqs({
+            attributes: {...ORDERS_ATTRIBUTES, MaximumMessageSize: '262144'},
+        })
+        const [resource] = await new AwsSqsAdapter(client).list()
+        expect(resource?.metadata.maximumMessageSize).toBe(262144)
+        expect(resource?.metadata.maximumMessageSizeKb).toBe(256)
     })
 
     test('converts SQS epoch-second timestamps to ISO', async () => {
@@ -266,6 +299,98 @@ describe('AwsSqsAdapter', () => {
         expect((sent[0] as CreateQueueCommand).input.Attributes).toBeUndefined()
     })
 
+    test('updates a single queue attribute', async () => {
+        const {client, sent} = stubSqs()
+        await new AwsSqsAdapter(client).update('orders-queue', {
+            values: {
+                visibilityTimeout: '45',
+            },
+        })
+
+        expect(sent[0]).toBeInstanceOf(GetQueueUrlCommand)
+        const setCommand = sent.find((c) => c instanceof SetQueueAttributesCommand) as SetQueueAttributesCommand
+        expect(setCommand).toBeInstanceOf(SetQueueAttributesCommand)
+        expect(setCommand.input.QueueUrl).toBe(`${BASE}/orders-queue`)
+        expect(setCommand.input.Attributes).toEqual({
+            VisibilityTimeout: '45',
+        })
+    })
+
+    test('updates multiple queue attributes and converts maximumMessageSizeKb to bytes', async () => {
+        const {client, sent} = stubSqs()
+        await new AwsSqsAdapter(client).update('orders-queue', {
+            values: {
+                visibilityTimeout: '60',
+                messageRetentionPeriod: '1209600',
+                delaySeconds: '15',
+                maximumMessageSizeKb: '512',
+                receiveMessageWaitTimeSeconds: '10',
+            },
+        })
+
+        const setCommand = sent.find((c) => c instanceof SetQueueAttributesCommand) as SetQueueAttributesCommand
+        expect(setCommand.input.Attributes).toEqual({
+            VisibilityTimeout: '60',
+            MessageRetentionPeriod: '1209600',
+            DelaySeconds: '15',
+            MaximumMessageSize: '524288',
+            ReceiveMessageWaitTimeSeconds: '10',
+        })
+    })
+
+    test('updates maximumMessageSize using raw bytes', async () => {
+        const {client, sent} = stubSqs()
+        await new AwsSqsAdapter(client).update('orders-queue', {
+            values: {
+                maximumMessageSize: '65536',
+            },
+        })
+
+        const setCommand = sent.find((c) => c instanceof SetQueueAttributesCommand) as SetQueueAttributesCommand
+        expect(setCommand.input.Attributes).toEqual({
+            MaximumMessageSize: '65536',
+        })
+    })
+
+    test('rejects update with no attributes or empty values', async () => {
+        const adapter = new AwsSqsAdapter(stubSqs().client)
+        await expect(adapter.update('orders-queue', {values: {}})).rejects.toThrow(
+            'At least one queue attribute must be provided to update.',
+        )
+        await expect(
+            adapter.update('orders-queue', {values: {visibilityTimeout: '', delaySeconds: ''}}),
+        ).rejects.toThrow('At least one queue attribute must be provided to update.')
+    })
+
+    test('rejects out-of-range attributes on update', async () => {
+        const adapter = new AwsSqsAdapter(stubSqs().client)
+        await expect(
+            adapter.update('orders-queue', {values: {visibilityTimeout: '43201'}}),
+        ).rejects.toThrow(ValidationError)
+        await expect(
+            adapter.update('orders-queue', {values: {messageRetentionPeriod: '59'}}),
+        ).rejects.toThrow(ValidationError)
+        await expect(
+            adapter.update('orders-queue', {values: {delaySeconds: '901'}}),
+        ).rejects.toThrow(ValidationError)
+        await expect(
+            adapter.update('orders-queue', {values: {maximumMessageSizeKb: '0'}}),
+        ).rejects.toThrow('maximumMessageSizeKb must be between 1 and 1024 KB.')
+        await expect(
+            adapter.update('orders-queue', {values: {maximumMessageSizeKb: '1025'}}),
+        ).rejects.toThrow('maximumMessageSizeKb must be between 1 and 1024 KB.')
+        await expect(
+            adapter.update('orders-queue', {values: {receiveMessageWaitTimeSeconds: '21'}}),
+        ).rejects.toThrow(ValidationError)
+    })
+
+    test('reports a missing queue on update rather than a runtime error', async () => {
+        const {client} = stubSqs({missingQueue: true})
+        await expect(
+            new AwsSqsAdapter(client).update('nope', {values: {visibilityTimeout: '30'}}),
+        ).rejects.toBeInstanceOf(NotFoundError)
+    })
+
     test('deletes a queue by resolving its URL first', async () => {
         const {client, sent} = stubSqs()
         await new AwsSqsAdapter(client).delete('orders-queue')
@@ -379,42 +504,44 @@ describe('AwsSqsAdapter', () => {
         expect(blankCommand.input.Attributes).toEqual({VisibilityTimeout: '30'})
     })
 
-    test('enforces exact min and max validation patterns on all queue creation fields in schema', () => {
+    test('enforces exact min and max validation patterns on all queue creation and update fields in schema', () => {
         const schema = awsMessagingSchema()
-        const field = (name: string) => schema.fields.find((f) => f.name === name)!
+        for (const fieldList of [schema.fields, schema.updateFields!]) {
+            const field = (name: string) => fieldList.find((f) => f.name === name)!
 
-        // VisibilityTimeout: 0 to 43200
-        const vtPattern = new RegExp(field('visibilityTimeout').validation!.pattern!)
-        expect(vtPattern.test('0')).toBe(true)
-        expect(vtPattern.test('43200')).toBe(true)
-        expect(vtPattern.test('43201')).toBe(false)
-        expect(vtPattern.test('-1')).toBe(false)
+            // VisibilityTimeout: 0 to 43200
+            const vtPattern = new RegExp(field('visibilityTimeout').validation!.pattern!)
+            expect(vtPattern.test('0')).toBe(true)
+            expect(vtPattern.test('43200')).toBe(true)
+            expect(vtPattern.test('43201')).toBe(false)
+            expect(vtPattern.test('-1')).toBe(false)
 
-        // MessageRetentionPeriod: 60 to 1209600
-        const retPattern = new RegExp(field('messageRetentionPeriod').validation!.pattern!)
-        expect(retPattern.test('59')).toBe(false)
-        expect(retPattern.test('60')).toBe(true)
-        expect(retPattern.test('1209600')).toBe(true)
-        expect(retPattern.test('1209601')).toBe(false)
+            // MessageRetentionPeriod: 60 to 1209600
+            const retPattern = new RegExp(field('messageRetentionPeriod').validation!.pattern!)
+            expect(retPattern.test('59')).toBe(false)
+            expect(retPattern.test('60')).toBe(true)
+            expect(retPattern.test('1209600')).toBe(true)
+            expect(retPattern.test('1209601')).toBe(false)
 
-        // DelaySeconds: 0 to 900
-        const delayPattern = new RegExp(field('delaySeconds').validation!.pattern!)
-        expect(delayPattern.test('0')).toBe(true)
-        expect(delayPattern.test('900')).toBe(true)
-        expect(delayPattern.test('901')).toBe(false)
+            // DelaySeconds: 0 to 900
+            const delayPattern = new RegExp(field('delaySeconds').validation!.pattern!)
+            expect(delayPattern.test('0')).toBe(true)
+            expect(delayPattern.test('900')).toBe(true)
+            expect(delayPattern.test('901')).toBe(false)
 
-        // MaximumMessageSize: 1 to 1024 KB
-        const sizePattern = new RegExp(field('maximumMessageSizeKb').validation!.pattern!)
-        expect(sizePattern.test('0')).toBe(false)
-        expect(sizePattern.test('1')).toBe(true)
-        expect(sizePattern.test('1024')).toBe(true)
-        expect(sizePattern.test('1025')).toBe(false)
+            // MaximumMessageSize: 1 to 1024 KB
+            const sizePattern = new RegExp(field('maximumMessageSizeKb').validation!.pattern!)
+            expect(sizePattern.test('0')).toBe(false)
+            expect(sizePattern.test('1')).toBe(true)
+            expect(sizePattern.test('1024')).toBe(true)
+            expect(sizePattern.test('1025')).toBe(false)
 
-        // ReceiveMessageWaitTimeSeconds: 0 to 20
-        const waitPattern = new RegExp(field('receiveMessageWaitTimeSeconds').validation!.pattern!)
-        expect(waitPattern.test('0')).toBe(true)
-        expect(waitPattern.test('20')).toBe(true)
-        expect(waitPattern.test('21')).toBe(false)
+            // ReceiveMessageWaitTimeSeconds: 0 to 20
+            const waitPattern = new RegExp(field('receiveMessageWaitTimeSeconds').validation!.pattern!)
+            expect(waitPattern.test('0')).toBe(true)
+            expect(waitPattern.test('20')).toBe(true)
+            expect(waitPattern.test('21')).toBe(false)
+        }
     })
 
     test('sends a message by resolving the queue URL first', async () => {

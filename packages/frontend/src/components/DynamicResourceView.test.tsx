@@ -12,6 +12,7 @@ import {
   getServiceSchema,
   listCloudResources,
   listStorageObjects,
+  updateCloudResource,
   uploadStorageObject,
 } from "@/api/cloudProxyClient";
 import { DynamicResourceView } from "@/components/DynamicResourceView";
@@ -217,6 +218,85 @@ describe("DynamicResourceView", () => {
           "arn:aws:cognito-idp:us-east-1:000000000000:userpool/pool-1",
         ),
       ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("opens the edit modal with prefilled values and submits updates", async () => {
+    const updateSchema: ServiceSchema = {
+      cloud: "aws",
+      service: "messaging",
+      displayName: "AWS SQS",
+      fields: [],
+      filters: [],
+      actions: ["list", "update", "inspect"],
+      columns: [{ name: "name", label: "Name" }],
+      updateFields: [
+        {
+          name: "visibilityTimeout",
+          label: "Visibility Timeout",
+          type: "text",
+          required: false,
+          valuePath: "metadata.visibilityTimeout",
+          validation: {
+            pattern: "^(0|[1-9][0-9]{0,3}|[1-3][0-9]{4}|4[0-2][0-9]{3}|43[01][0-9]{2}|43200)$",
+            message: "Use a whole number of seconds between 0 and 43200.",
+          },
+        },
+      ],
+    };
+
+    const sqsSummary: CloudResource = {
+      id: "orders-queue",
+      name: "orders-queue",
+      cloud: "aws",
+      service: "messaging",
+      type: "queue",
+      region: "us-east-1",
+      createdAt: null,
+      metadata: {
+        visibilityTimeout: "30",
+      },
+    };
+
+    vi.mocked(getServiceSchema).mockResolvedValue(updateSchema);
+    vi.mocked(listCloudResources).mockResolvedValue([sqsSummary]);
+    vi.mocked(updateCloudResource).mockResolvedValue({
+      ...sqsSummary,
+      metadata: { visibilityTimeout: "60" },
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const user = userEvent.setup();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <DynamicResourceView
+          cloud="aws"
+          service="messaging"
+          serviceAvailability="available"
+          cloudStatus={cloudStatus}
+          onOpenInfo={vi.fn()}
+        />
+      </QueryClientProvider>,
+    );
+
+    const editButton = await screen.findByRole("button", { name: "Edit orders-queue" });
+    await user.click(editButton);
+
+    expect(await screen.findByRole("heading", { name: "Edit AWS SQS: orders-queue" })).toBeInTheDocument();
+    const input = screen.getByLabelText(/Visibility Timeout/i) as HTMLInputElement;
+    expect(input.value).toBe("30");
+
+    await user.clear(input);
+    await user.type(input, "60");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() =>
+      expect(updateCloudResource).toHaveBeenCalledWith("aws", "messaging", "orders-queue", {
+        visibilityTimeout: "60",
+      }),
     );
   });
 });

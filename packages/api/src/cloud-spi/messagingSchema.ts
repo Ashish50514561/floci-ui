@@ -49,6 +49,36 @@ const sqsMessageCapabilities: CapabilitySchema<ResourceActionName>[] = [
     {name: 'purgeQueue', label: 'Purge Queue', enabled: true, status: 'available', runtimeRequired: true},
 ]
 
+/**
+ * Shared validation rules for SQS queue attributes used by both create and update forms.
+ */
+export const sqsValidations = {
+    queueName: {
+        pattern: '^([A-Za-z0-9_-]{1,80}|[A-Za-z0-9_-]{1,75}\\.fifo)$',
+        message: 'Use a valid SQS queue name: up to 80 alphanumeric characters, hyphens, or underscores.',
+    },
+    visibilityTimeout: {
+        pattern: '^(0|[1-9][0-9]{0,3}|[1-3][0-9]{4}|4[0-2][0-9]{3}|43[01][0-9]{2}|43200)$',
+        message: 'Use a whole number of seconds between 0 and 43200.',
+    },
+    messageRetentionPeriod: {
+        pattern: '^([6-9][0-9]|[1-9][0-9]{2,5}|1[01][0-9]{5}|120[0-8][0-9]{3}|1209[0-5][0-9]{2}|1209600)$',
+        message: 'Use a whole number of seconds between 60 and 1209600.',
+    },
+    delaySeconds: {
+        pattern: '^(0|[1-9][0-9]?|[1-8][0-9]{2}|900)$',
+        message: 'Use a whole number of seconds between 0 and 900.',
+    },
+    maximumMessageSizeKb: {
+        pattern: '^([1-9][0-9]{0,2}|10[01][0-9]|102[0-4])$',
+        message: 'Use a whole number of KB between 1 and 1024.',
+    },
+    receiveMessageWaitTimeSeconds: {
+        pattern: '^(0|[1-9]|1[0-9]|20)$',
+        message: 'Use a whole number of seconds between 0 and 20.',
+    },
+} as const satisfies Record<string, NonNullable<FieldSchema['validation']>>
+
 export function awsMessagingSchema(): ServiceSchema {
     return {
         cloud: 'aws',
@@ -61,10 +91,7 @@ export function awsMessagingSchema(): ServiceSchema {
                 type: 'text',
                 required: true,
                 description: 'Up to 80 alphanumeric characters, hyphens, or underscores (FIFO queues must end in .fifo).',
-                validation: {
-                    pattern: '^([A-Za-z0-9_-]{1,80}|[A-Za-z0-9_-]{1,75}\\.fifo)$',
-                    message: 'Use a valid SQS queue name: up to 80 alphanumeric characters, hyphens, or underscores.',
-                },
+                validation: sqsValidations.queueName,
             },
             {
                 name: 'visibilityTimeout',
@@ -72,10 +99,7 @@ export function awsMessagingSchema(): ServiceSchema {
                 type: 'text',
                 required: false,
                 description: 'Seconds a received message stays hidden (0-43200). Defaults to 30.',
-                validation: {
-                    pattern: '^(0|[1-9][0-9]{0,3}|[1-3][0-9]{4}|4[0-2][0-9]{3}|43[01][0-9]{2}|43200)$',
-                    message: 'Use a whole number of seconds between 0 and 43200.',
-                },
+                validation: sqsValidations.visibilityTimeout,
             },
             {
                 name: 'messageRetentionPeriod',
@@ -83,10 +107,7 @@ export function awsMessagingSchema(): ServiceSchema {
                 type: 'text',
                 required: false,
                 description: 'Seconds a message is kept (60-1209600). Defaults to 345600 (4 days).',
-                validation: {
-                    pattern: '^([6-9][0-9]|[1-9][0-9]{2,5}|1[01][0-9]{5}|120[0-8][0-9]{3}|1209[0-5][0-9]{2}|1209600)$',
-                    message: 'Use a whole number of seconds between 60 and 1209600.',
-                },
+                validation: sqsValidations.messageRetentionPeriod,
             },
             {
                 name: 'delaySeconds',
@@ -94,10 +115,7 @@ export function awsMessagingSchema(): ServiceSchema {
                 type: 'text',
                 required: false,
                 description: 'Delivery delay for all messages sent to the queue (0-900 seconds). Defaults to 0.',
-                validation: {
-                    pattern: '^(0|[1-9][0-9]?|[1-8][0-9]{2}|900)$',
-                    message: 'Use a whole number of seconds between 0 and 900.',
-                },
+                validation: sqsValidations.delaySeconds,
             },
             {
                 name: 'maximumMessageSizeKb',
@@ -105,10 +123,7 @@ export function awsMessagingSchema(): ServiceSchema {
                 type: 'text',
                 required: false,
                 description: 'Maximum message size in KB (1-1024). Defaults to 1024 (1 MB).',
-                validation: {
-                    pattern: '^([1-9][0-9]{0,2}|10[01][0-9]|102[0-4])$',
-                    message: 'Use a whole number of KB between 1 and 1024.',
-                },
+                validation: sqsValidations.maximumMessageSizeKb,
             },
             {
                 name: 'receiveMessageWaitTimeSeconds',
@@ -116,13 +131,66 @@ export function awsMessagingSchema(): ServiceSchema {
                 type: 'text',
                 required: false,
                 description: 'Wait time for ReceiveMessage calls (0-20 seconds). Defaults to 0.',
-                validation: {pattern: '^(0|[1-9]|1[0-9]|20)$', message: 'Use a whole number of seconds between 0 and 20.'},
+                validation: sqsValidations.receiveMessageWaitTimeSeconds,
             },
         ],
-        actions: ['list', 'create', 'inspect', 'delete'],
+        actions: ['list', 'create', 'update', 'inspect', 'delete'],
         filters: messagingFilters,
         columns: messagingColumns,
-        capabilities: {resourceActions: [...crudCapabilities('queue'), ...sqsMessageCapabilities]},
+        updateFields: [
+            {
+                name: 'visibilityTimeout',
+                label: 'Visibility Timeout',
+                type: 'text',
+                required: false,
+                valuePath: 'metadata.visibilityTimeout',
+                description: 'Seconds a received message stays hidden (0-43200).',
+                validation: sqsValidations.visibilityTimeout,
+            },
+            {
+                name: 'messageRetentionPeriod',
+                label: 'Retention Period',
+                type: 'text',
+                required: false,
+                valuePath: 'metadata.messageRetentionPeriod',
+                description: 'Seconds a message is kept (60-1209600).',
+                validation: sqsValidations.messageRetentionPeriod,
+            },
+            {
+                name: 'delaySeconds',
+                label: 'Delivery Delay',
+                type: 'text',
+                required: false,
+                valuePath: 'metadata.delaySeconds',
+                description: 'Delivery delay for all messages sent to the queue (0-900 seconds).',
+                validation: sqsValidations.delaySeconds,
+            },
+            {
+                name: 'maximumMessageSizeKb',
+                label: 'Maximum Message Size (KB)',
+                type: 'text',
+                required: false,
+                valuePath: 'metadata.maximumMessageSizeKb',
+                description: 'Maximum message size in KB (1-1024).',
+                validation: sqsValidations.maximumMessageSizeKb,
+            },
+            {
+                name: 'receiveMessageWaitTimeSeconds',
+                label: 'Receive Wait Time',
+                type: 'text',
+                required: false,
+                valuePath: 'metadata.receiveMessageWaitTimeSeconds',
+                description: 'Wait time for ReceiveMessage calls (0-20 seconds).',
+                validation: sqsValidations.receiveMessageWaitTimeSeconds,
+            },
+        ],
+        capabilities: {
+            resourceActions: [
+                ...crudCapabilities('queue'),
+                {name: 'update', label: 'Update queue', enabled: true, status: 'available', runtimeRequired: true},
+                ...sqsMessageCapabilities,
+            ],
+        },
     }
 }
 

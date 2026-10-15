@@ -8,6 +8,7 @@ import {
     PurgeQueueCommand,
     ReceiveMessageCommand,
     SendMessageCommand,
+    SetQueueAttributesCommand,
     type SQSClient,
 } from '@aws-sdk/client-sqs'
 import {NotFoundError, ValidationError} from '../cloud-spi/errors'
@@ -22,6 +23,7 @@ import type {
     ResourceQuery,
     SendQueueMessageResult,
     ServiceSchema,
+    UpdateResourceInput,
 } from '../cloud-spi/types'
 
 /**
@@ -122,6 +124,51 @@ export class AwsSqsAdapter implements CloudServiceAdapter {
 
         const url = res.QueueUrl ?? (await this.queueUrl(name)) ?? ''
         return toResource(name, url, await this.attributesFor(url).catch(() => ({})))
+    }
+
+    async update(id: string, input: UpdateResourceInput): Promise<CloudResource> {
+        const url = await this.requireQueueUrl(id)
+        const values = input.values ?? {}
+        const attributes: Record<string, string> = {}
+
+        if (values.visibilityTimeout !== undefined) {
+            const val = numericAttribute(values.visibilityTimeout, 'visibilityTimeout', 0, 43_200)
+            if (val) attributes.VisibilityTimeout = val
+        }
+        if (values.messageRetentionPeriod !== undefined) {
+            const val = numericAttribute(values.messageRetentionPeriod, 'messageRetentionPeriod', 60, 1_209_600)
+            if (val) attributes.MessageRetentionPeriod = val
+        }
+        if (values.delaySeconds !== undefined) {
+            const val = numericAttribute(values.delaySeconds, 'delaySeconds', 0, 900)
+            if (val) attributes.DelaySeconds = val
+        }
+        if (values.maximumMessageSizeKb !== undefined || values.maximumMessageSize !== undefined) {
+            const val = resolveMaximumMessageSize(values)
+            if (val) attributes.MaximumMessageSize = val
+        }
+        if (values.receiveMessageWaitTimeSeconds !== undefined) {
+            const val = numericAttribute(
+                values.receiveMessageWaitTimeSeconds,
+                'receiveMessageWaitTimeSeconds',
+                0,
+                20,
+            )
+            if (val) attributes.ReceiveMessageWaitTimeSeconds = val
+        }
+
+        if (Object.keys(attributes).length === 0) {
+            throw new ValidationError('At least one queue attribute must be provided to update.')
+        }
+
+        await this.sqs.send(
+            new SetQueueAttributesCommand({
+                QueueUrl: url,
+                Attributes: attributes,
+            }),
+        )
+
+        return toResource(id, url, await this.attributesFor(url).catch(() => ({})))
     }
 
     async delete(id: string): Promise<void> {
@@ -258,6 +305,10 @@ function toResource(name: string, url: string, attributes: QueueAttributes): Clo
             visibilityTimeout: numberValue(attributes.VisibilityTimeout),
             messageRetentionPeriod: numberValue(attributes.MessageRetentionPeriod),
             maximumMessageSize: numberValue(attributes.MaximumMessageSize),
+            maximumMessageSizeKb:
+                numberValue(attributes.MaximumMessageSize) !== null
+                    ? Math.round(numberValue(attributes.MaximumMessageSize)! / 1024)
+                    : null,
             delaySeconds: numberValue(attributes.DelaySeconds),
             receiveMessageWaitTimeSeconds: numberValue(attributes.ReceiveMessageWaitTimeSeconds),
             lastModified: epochSecondsToIso(attributes.LastModifiedTimestamp),
