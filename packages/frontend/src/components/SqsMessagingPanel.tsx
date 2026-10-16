@@ -15,11 +15,13 @@ interface SqsMessagingPanelProps {
   cloud: CloudProvider;
   resource?: CloudResource;
   runtimeReachable: boolean;
+  onMessagesChanged?: () => void;
 }
 
 type MessagingTab = "send" | "receive" | "purge";
 
-export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessagingPanelProps) {
+export function SqsMessagingPanel({cloud, resource, runtimeReachable, onMessagesChanged}: SqsMessagingPanelProps) {
+  const isOci = cloud === "oci";
   const accountId = useAccountId();
   const [tab, setTab] = useState<MessagingTab>("send");
   const [body, setBody] = useState("");
@@ -66,7 +68,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
       activeRequest.current?.abort();
       activeRequest.current = null;
     };
-  }, [accountId, resource?.id]);
+  }, [accountId, cloud, resource?.id]);
 
   const isQueue = resource?.service === "messaging" && (resource.type === "queue" || resource.type === "fifo-queue");
   const canUseQueue = Boolean(isQueue && runtimeReachable);
@@ -87,10 +89,11 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
     setSendResult(null);
     setSending(true);
     try {
-      const result = await sendQueueMessage(cloud, "messaging", resource.id, body, Object.keys(customAttributes).length > 0 ? customAttributes : undefined);
+      const result = await sendQueueMessage(cloud, "messaging", resource.id, body, !isOci && Object.keys(customAttributes).length > 0 ? customAttributes : undefined);
       setSendResult({messageId: result.messageId});
       setBody("");
       setCustomAttributes({});
+      onMessagesChanged?.();
     } catch (error) {
       setSendError(error instanceof Error ? error.message : "Failed to send the message.");
     } finally {
@@ -106,6 +109,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
       const received = await receiveQueueMessages(cloud, "messaging", resource.id, maxMessages || 10);
       setMessages(received);
       setHasPolled(true);
+      onMessagesChanged?.();
     } catch (error) {
       setReceiveError(error instanceof Error ? error.message : "Failed to receive messages.");
     } finally {
@@ -119,6 +123,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
     try {
       await deleteQueueMessage(cloud, "messaging", resource.id, receiptHandle);
       setMessages((current) => current.filter((message) => message.receiptHandle !== receiptHandle));
+      onMessagesChanged?.();
     } catch (error) {
       setReceiveError(error instanceof Error ? error.message : "Failed to delete the message.");
     } finally {
@@ -127,7 +132,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
   };
 
   const submitPurge = async () => {
-    if (!resource || !canUseQueue) return;
+    if (!resource || !canUseQueue || isOci) return;
     setPurgeError(null);
     setPurging(true);
     try {
@@ -135,6 +140,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
       setPurged(true);
       setPurgeConfirming(false);
       setMessages([]);
+      onMessagesChanged?.();
     } catch (error) {
       setPurgeError(error instanceof Error ? error.message : "Failed to purge the queue.");
     } finally {
@@ -147,7 +153,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
       <section className="table-panel">
         <div className="empty compact">
           <h2>Select a queue</h2>
-          <p>Select an SQS queue to send, receive, or purge its messages.</p>
+          <p>{isOci ? "Select an OCI queue to send, receive, or delete its messages." : "Select an SQS queue to send, receive, or purge its messages."}</p>
         </div>
       </section>
     );
@@ -160,8 +166,9 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
           <p className="eyebrow">Queue Actions</p>
           <h2><Send size={15} /> Messages</h2>
           <p className="muted compact-text">
-            Send, peek, and delete messages on this queue without leaving the console.
+            {isOci ? "Send, receive, and delete OCI Queue messages here." : "Send, peek, and delete messages on this queue without leaving the console."}
           </p>
+          {isOci && <p className="muted compact-text">Channels and long polling are not available here because these shared controls use immediate, unfiltered receives.</p>}
         </div>
         <span className={`runtime-state ${canUseQueue ? "ready" : "pending"}`}>
           {canUseQueue ? "Ready" : runtimeReachable ? "Not a queue" : "Runtime unavailable"}
@@ -176,9 +183,11 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
           <button type="button" className={`drawer-tab ${tab === "receive" ? "active" : ""}`} onClick={() => changeTab("receive")}>
             <Inbox size={13} /> Receive
           </button>
-          <button type="button" className={`drawer-tab ${tab === "purge" ? "active" : ""}`} onClick={() => changeTab("purge")}>
-            <Trash2 size={13} /> Purge
-          </button>
+          {!isOci && (
+            <button type="button" className={`drawer-tab ${tab === "purge" ? "active" : ""}`} onClick={() => changeTab("purge")}>
+              <Trash2 size={13} /> Purge
+            </button>
+          )}
         </div>
 
         {tab === "send" && (
@@ -197,7 +206,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
               />
             </div>
 
-            <div style={{ marginBottom: "16px" }}>
+            {!isOci && <div style={{ marginBottom: "16px" }}>
               <label className="metric-label" style={{ display: "block", marginBottom: "6px" }}>Custom attributes</label>
               <div style={{display: "flex", gap: "8px", marginBottom: "8px"}}>
                 <input aria-label="Attribute key"
@@ -258,7 +267,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
                 ))}
               </ul>
             )}
-            </div>
+            </div>}
 
             <button
               className="button primary"
@@ -281,7 +290,9 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
         {tab === "receive" && (
           <>
             <p className="muted compact-text">
-              A receive is a non-consuming peek: messages stay in the queue until you delete them here.
+              {isOci
+                ? "Receives use the queue visibility timeout. Delete a message here, or it becomes available again when a nonzero timeout expires."
+                : "A receive is a non-consuming peek: messages stay in the queue until you delete them here."}
             </p>
             <label className="metric-label" htmlFor="sqs-max-messages">Max messages (up to 10)</label>
             <input
@@ -390,7 +401,7 @@ export function SqsMessagingPanel({cloud, resource, runtimeReachable}: SqsMessag
           </>
         )}
 
-        {tab === "purge" && (
+        {tab === "purge" && !isOci && (
           <>
             <p className="muted compact-text">
               Purging deletes every message currently in this queue. This cannot be undone.
