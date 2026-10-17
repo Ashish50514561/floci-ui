@@ -1,17 +1,18 @@
 import {QueryClient, QueryClientProvider} from '@tanstack/react-query'
-import {render, screen, waitFor} from '@testing-library/react'
+import {render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type {ReactElement} from 'react'
 import {DynamoDbTableExplorer} from '@/components/DynamoDbTableExplorer'
 import type {ChildItem, CloudResource, CollectionPage} from '@/types/resource'
 
-const {listFlatItems, putFlatItem, queryFlatItems} = vi.hoisted(() => ({
+const {listFlatItems, putFlatItem, queryFlatItems, queryFlatItemsByKey} = vi.hoisted(() => ({
     listFlatItems: vi.fn(),
     putFlatItem: vi.fn(),
     queryFlatItems: vi.fn(),
+    queryFlatItemsByKey: vi.fn(),
 }))
 
-vi.mock('@/api/cloudProxyClient', () => ({listFlatItems, putFlatItem, queryFlatItems}))
+vi.mock('@/api/cloudProxyClient', () => ({listFlatItems, putFlatItem, queryFlatItems, queryFlatItemsByKey}))
 
 function table(id: string): CloudResource {
     return {
@@ -54,6 +55,7 @@ describe('DynamoDbTableExplorer', () => {
         renderExplorer(<DynamoDbTableExplorer cloud="aws" resource={table('orders')} runtimeReachable/>)
 
         expect(await screen.findByRole('cell', {name: '{"id":"order-1"}'})).toBeInTheDocument()
+        expect(screen.getByText('1 record')).toBeInTheDocument()
         expect(listFlatItems).toHaveBeenCalledWith('aws', 'nosql', 'orders', undefined, expect.any(AbortSignal))
     })
 
@@ -251,5 +253,251 @@ describe('DynamoDbTableExplorer', () => {
 
         expect(await screen.findByRole('cell', {name: '{"id":"order-2"}'})).toBeInTheDocument()
         expect(listFlatItems).toHaveBeenLastCalledWith('aws', 'nosql', 'orders', 'new-token', expect.any(AbortSignal))
+    })
+})
+
+function indexedTable(): CloudResource {
+    return {
+        ...table('orders'),
+        metadata: {
+            keySchema: [{AttributeName: 'customerId', KeyType: 'HASH'}, {AttributeName: 'orderId', KeyType: 'RANGE'}],
+            attributeDefinitions: [
+                {AttributeName: 'customerId', AttributeType: 'S'},
+                {AttributeName: 'orderId', AttributeType: 'S'},
+                {AttributeName: 'status', AttributeType: 'S'},
+                {AttributeName: 'total', AttributeType: 'N'},
+            ],
+            globalSecondaryIndexes: [{
+                IndexName: 'by-status',
+                KeySchema: [{AttributeName: 'status', KeyType: 'HASH'}, {AttributeName: 'total', KeyType: 'RANGE'}],
+            }],
+        },
+    }
+}
+
+function order(body: Record<string, unknown>): ChildItem {
+    const key = {customerId: body.customerId, orderId: body.orderId}
+    return {id: JSON.stringify(key), collectionId: null, timestamp: null, body, metadata: {key}}
+}
+
+describe('DynamoDbTableExplorer query mode', () => {
+    beforeEach(() => {
+        listFlatItems.mockResolvedValue(page([order({customerId: 'c-1', orderId: 'o-1'})]))
+    })
+
+    async function openQueryMode() {
+        const user = userEvent.setup()
+        renderExplorer(<DynamoDbTableExplorer cloud="aws" resource={indexedTable()} runtimeReachable/>)
+        await user.click(screen.getByRole('radio', {name: 'Query'}))
+        return user
+    }
+
+    test('offers the table and every secondary index with their keys', async () => {
+        await openQueryMode()
+
+        const options = within(screen.getByRole('combobox', {name: 'Table or index'})).getAllByRole('option')
+        expect(options.map((option) => option.textContent)).toEqual([
+            'Table: orders (customerId, orderId)',
+            'GSI: by-status (status, total)',
+        ])
+        expect(queryFlatItemsByKey).not.toHaveBeenCalled()
+    })
+
+    test('queries the table by partition key and shows the matches', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([order({customerId: 'c-9', orderId: 'o-4'})]))
+        const user = await openQueryMode()
+        const run = screen.getByRole('button', {name: 'Run query'})
+
+        expect(run).toBeDisabled()
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-9')
+        await user.click(run)
+
+        expect(await screen.findByRole('cell', {name: '{"customerId":"c-9","orderId":"o-4"}'})).toBeInTheDocument()
+        expect(screen.queryByRole('cell', {name: '{"customerId":"c-1","orderId":"o-1"}'})).not.toBeInTheDocument()
+        expect(queryFlatItemsByKey).toHaveBeenCalledWith('aws', 'nosql', 'orders', {partitionKey: 'c-9'}, undefined, expect.any(AbortSignal))
+    })
+
+    test('queries the table by partition key and a sort key condition', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([order({customerId: 'c-1', orderId: 'o-2'})]))
+        const user = await openQueryMode()
+
+        const partitionKey = screen.getByRole('textbox', {name: 'Partition key'})
+        expect(partitionKey).toHaveAttribute('placeholder', 'customerId (string)')
+        await user.type(partitionKey, 'c-1')
+        await user.selectOptions(screen.getByRole('combobox', {name: 'Sort key condition'}), 'beginsWith')
+        const sortKey = screen.getByRole('textbox', {name: 'Sort key value'})
+        expect(sortKey).toHaveAttribute('placeholder', 'orderId (string)')
+        await user.type(sortKey, 'o-2{Enter}')
+
+        expect(await screen.findByRole('cell', {name: '{"customerId":"c-1","orderId":"o-2"}'})).toBeInTheDocument()
+        expect(queryFlatItemsByKey).toHaveBeenCalledWith('aws', 'nosql', 'orders', {
+            partitionKey: 'c-1',
+            sortKey: {operator: 'beginsWith', value: 'o-2'},
+        }, undefined, expect.any(AbortSignal))
+    })
+
+    test('queries an index with a between condition in descending order', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([]))
+        const user = await openQueryMode()
+
+        await user.selectOptions(screen.getByRole('combobox', {name: 'Table or index'}), 'by-status')
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'open')
+        const condition = screen.getByRole('combobox', {name: 'Sort key condition'})
+        expect(within(condition).queryByRole('option', {name: 'Begins with'})).not.toBeInTheDocument()
+        await user.selectOptions(condition, 'between')
+        await user.type(screen.getByRole('textbox', {name: 'Sort key lower bound'}), '10')
+        expect(screen.getByRole('button', {name: 'Run query'})).toBeDisabled()
+        await user.type(screen.getByRole('textbox', {name: 'Sort key upper bound'}), '50')
+        await user.selectOptions(screen.getByRole('combobox', {name: 'Order'}), 'desc')
+        await user.click(screen.getByRole('button', {name: 'Run query'}))
+
+        expect(await screen.findByText('No items match this key condition.')).toBeInTheDocument()
+        expect(queryFlatItemsByKey).toHaveBeenCalledWith('aws', 'nosql', 'orders', {
+            index: 'by-status',
+            partitionKey: 'open',
+            sortKey: {operator: 'between', value: '10', to: '50'},
+            descending: true,
+        }, undefined, expect.any(AbortSignal))
+    })
+
+    test('continues the query that produced the cursor', async () => {
+        queryFlatItemsByKey
+            .mockResolvedValueOnce(page([order({customerId: 'c-1', orderId: 'o-1'})], 'key-2'))
+            .mockResolvedValueOnce(page([order({customerId: 'c-1', orderId: 'o-2'})]))
+        const user = await openQueryMode()
+
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-1{Enter}')
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), '-edited')
+        await user.click(await screen.findByRole('button', {name: 'Load more'}))
+
+        expect(await screen.findByRole('cell', {name: '{"customerId":"c-1","orderId":"o-2"}'})).toBeInTheDocument()
+        expect(queryFlatItemsByKey).toHaveBeenLastCalledWith('aws', 'nosql', 'orders', {partitionKey: 'c-1'}, 'key-2', expect.any(AbortSignal))
+    })
+
+    test('reruns an identical query instead of serving the cached result', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([]))
+        const user = await openQueryMode()
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-1')
+
+        await user.click(screen.getByRole('button', {name: 'Run query'}))
+        await screen.findByText('No items match this key condition.')
+        await user.click(screen.getByRole('button', {name: 'Run query'}))
+
+        await waitFor(() => expect(queryFlatItemsByKey).toHaveBeenCalledTimes(2))
+    })
+
+    test('shows the query error', async () => {
+        queryFlatItemsByKey.mockRejectedValue(new Error('Key attribute total must be a number. (invalid_request)'))
+        const user = await openQueryMode()
+
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-1{Enter}')
+
+        expect(await screen.findByText('Key attribute total must be a number. (invalid_request)')).toBeInTheDocument()
+    })
+
+    test('prompts for a partition key instead of counting zero records before the first query', async () => {
+        await openQueryMode()
+
+        expect(screen.getByText('Enter a partition key to query')).toBeInTheDocument()
+        expect(screen.queryByText('0 records')).not.toBeInTheDocument()
+    })
+
+    test('does not rescan the hidden records while in query mode', async () => {
+        const user = userEvent.setup()
+        renderExplorer(<DynamoDbTableExplorer cloud="aws" resource={indexedTable()} runtimeReachable/>)
+        await screen.findByRole('cell', {name: '{"customerId":"c-1","orderId":"o-1"}'})
+        await user.click(screen.getByRole('radio', {name: 'Query'}))
+        const scans = listFlatItems.mock.calls.length
+        queryFlatItems.mockResolvedValue(page([]))
+
+        const editor = screen.getByRole('textbox', {name: 'PartiQL statement'})
+        await user.clear(editor)
+        await user.type(editor, `DELETE FROM "orders" WHERE customerId = 'c-1' AND orderId = 'o-1'`)
+        await user.click(screen.getByRole('button', {name: 'Run statement'}))
+        await screen.findByText('0 rows')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+
+        expect(listFlatItems.mock.calls.length).toBe(scans)
+    })
+
+    test('refreshes the query results after a PartiQL write', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([order({customerId: 'c-1', orderId: 'o-1'})]))
+        queryFlatItems.mockResolvedValue(page([]))
+        const user = await openQueryMode()
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-1{Enter}')
+        await screen.findByRole('cell', {name: '{"customerId":"c-1","orderId":"o-1"}'})
+        queryFlatItemsByKey.mockResolvedValue(page([]))
+
+        const editor = screen.getByRole('textbox', {name: 'PartiQL statement'})
+        await user.clear(editor)
+        await user.type(editor, `DELETE FROM "orders" WHERE customerId = 'c-1' AND orderId = 'o-1'`)
+        await user.click(screen.getByRole('button', {name: 'Run statement'}))
+
+        expect(await screen.findByText('No items match this key condition.')).toBeInTheDocument()
+        expect(screen.queryByRole('cell', {name: '{"customerId":"c-1","orderId":"o-1"}'})).not.toBeInTheDocument()
+    })
+
+    test('labels rows from an index that does not project every attribute', async () => {
+        const resource = indexedTable()
+        resource.metadata.globalSecondaryIndexes = [{
+            IndexName: 'by-status',
+            KeySchema: [{AttributeName: 'status', KeyType: 'HASH'}, {AttributeName: 'total', KeyType: 'RANGE'}],
+            Projection: {ProjectionType: 'KEYS_ONLY'},
+        }]
+        queryFlatItemsByKey.mockResolvedValue(page([order({customerId: 'c-1', orderId: 'o-1', status: 'open', total: 10})]))
+        const user = userEvent.setup()
+        renderExplorer(<DynamoDbTableExplorer cloud="aws" resource={resource} runtimeReachable/>)
+        await user.click(screen.getByRole('radio', {name: 'Query'}))
+
+        await user.selectOptions(screen.getByRole('combobox', {name: 'Table or index'}), 'by-status')
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'open{Enter}')
+        await user.click(await screen.findByRole('button', {name: '{"customerId":"c-1","orderId":"o-1"}'}))
+
+        expect(screen.getByText('Attributes projected into by-status')).toBeInTheDocument()
+    })
+
+    test('shows a record added in query mode among the scanned records', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([]))
+        putFlatItem.mockResolvedValue(order({customerId: 'c-5', orderId: 'o-1'}))
+        const user = await openQueryMode()
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-1{Enter}')
+        await screen.findByText('No items match this key condition.')
+
+        await user.click(screen.getByRole('button', {name: 'Add record'}))
+        listFlatItems.mockResolvedValue(page([order({customerId: 'c-1', orderId: 'o-1'}), order({customerId: 'c-5', orderId: 'o-1'})]))
+        await user.click(within(screen.getByRole('dialog')).getByRole('button', {name: 'Add record'}))
+
+        expect(await screen.findByRole('button', {name: '{"customerId":"c-5","orderId":"o-1"}', pressed: true})).toBeInTheDocument()
+        expect(screen.getByRole('radio', {name: 'Scan'})).toBeChecked()
+    })
+
+    test('keeps the query inputs when switching to Scan and back', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([]))
+        const user = await openQueryMode()
+        await user.selectOptions(screen.getByRole('combobox', {name: 'Table or index'}), 'by-status')
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'open')
+        await user.selectOptions(screen.getByRole('combobox', {name: 'Sort key condition'}), 'gt')
+        await user.type(screen.getByRole('textbox', {name: 'Sort key value'}), '20{Enter}')
+        await screen.findByText('No items match this key condition.')
+
+        await user.click(screen.getByRole('radio', {name: 'Scan'}))
+        await user.click(screen.getByRole('radio', {name: 'Query'}))
+
+        expect(screen.getByRole('combobox', {name: 'Table or index'})).toHaveValue('by-status')
+        expect(screen.getByRole('textbox', {name: 'Partition key'})).toHaveValue('open')
+        expect(screen.getByRole('combobox', {name: 'Sort key condition'})).toHaveValue('gt')
+        expect(screen.getByRole('textbox', {name: 'Sort key value'})).toHaveValue('20')
+    })
+
+    test('returns to the scanned records', async () => {
+        queryFlatItemsByKey.mockResolvedValue(page([]))
+        const user = await openQueryMode()
+        await user.type(screen.getByRole('textbox', {name: 'Partition key'}), 'c-1{Enter}')
+        await screen.findByText('No items match this key condition.')
+
+        await user.click(screen.getByRole('radio', {name: 'Scan'}))
+
+        expect(await screen.findByRole('cell', {name: '{"customerId":"c-1","orderId":"o-1"}'})).toBeInTheDocument()
+        expect(screen.queryByRole('form', {name: 'Query by key'})).not.toBeInTheDocument()
     })
 })

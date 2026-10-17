@@ -1,11 +1,11 @@
-import {useMemo, useState, type KeyboardEvent} from 'react'
-import {Braces, Play, Plus, RefreshCw, TableProperties} from 'lucide-react'
-import {useMutation, useQueries, useQueryClient, type UseMutationResult} from '@tanstack/react-query'
-import {listFlatItems, putFlatItem, queryFlatItems} from '@/api/cloudProxyClient'
+import {useId, useMemo, useState, type FormEvent, type KeyboardEvent} from 'react'
+import {Braces, Play, Plus, RefreshCw, Search, TableProperties} from 'lucide-react'
+import {useMutation, useQueries, useQueryClient} from '@tanstack/react-query'
+import {listFlatItems, putFlatItem, queryFlatItems, queryFlatItemsByKey} from '@/api/cloudProxyClient'
 import {JsonRecordModal} from '@/components/JsonRecordModal'
 import {useAccountId} from '@/lib/accountStore'
 import type {CloudProvider} from '@/types/cloud'
-import type {ChildItem, CloudResource} from '@/types/resource'
+import type {ChildItem, CloudResource, CollectionPage, KeyConditionOperator, KeyQuery} from '@/types/resource'
 
 interface DynamoDbTableExplorerProps {
     cloud: CloudProvider
@@ -22,9 +22,11 @@ interface TableExplorerProps {
 
 /**
  * Records are scanned one cursor page at a time through the generic flat item
- * store, one query per loaded page as in LogsExplorerPanel. The PartiQL panel
- * runs through the same store's query verb; its NextToken comes back as the
- * page cursor, so "Load more rows" continues the statement that produced it.
+ * store, one query per loaded page as in LogsExplorerPanel. Query mode reads
+ * the same way through the store's key query verb, against the table or a
+ * secondary index. The PartiQL panel runs through the store's query verb; its
+ * NextToken comes back as the page cursor, so "Load more rows" continues the
+ * statement that produced it.
  */
 export function DynamoDbTableExplorer({cloud, resource, runtimeReachable}: DynamoDbTableExplorerProps) {
     const accountId = useAccountId()
@@ -53,14 +55,54 @@ export function DynamoDbTableExplorer({cloud, resource, runtimeReachable}: Dynam
     )
 }
 
+type ReadMode = 'scan' | 'query'
+
 function TableExplorer({cloud, accountId, resource, runtimeReachable}: TableExplorerProps) {
     const tableName = resource.id
+    const [mode, setMode] = useState<ReadMode>('scan')
+    // Each run gets its own number, so running the same lookup again is a new
+    // query key and fetches fresh results from the first page.
+    const [keyQueryRun, setKeyQueryRun] = useState<{query: KeyQuery; run: number}>()
+    const keyQuery = keyQueryRun?.query
     const [selectedItemId, setSelectedItemId] = useState<string>()
     const [addRecordOpen, setAddRecordOpen] = useState(false)
     const keyFields = useMemo(() => dynamoKeyFields(resource), [resource])
-    const records = useScannedRecords(cloud, accountId, tableName, runtimeReachable)
+    const accessPaths = useMemo(() => dynamoAccessPaths(resource), [resource])
+    const scanned = usePagedRecords(
+        ['nosql-items', accountId, cloud, tableName],
+        (cursor, signal) => listFlatItems(cloud, 'nosql', tableName, cursor, signal),
+        runtimeReachable && mode === 'scan',
+    )
+    const queried = usePagedRecords(
+        ['nosql-key-query', accountId, cloud, tableName, keyQueryRun],
+        (cursor, signal) => queryFlatItemsByKey(cloud, 'nosql', tableName, keyQuery as KeyQuery, cursor, signal),
+        runtimeReachable && Boolean(keyQuery),
+    )
+    const records = mode === 'query' ? queried : scanned
     const selectedItem = records.items.find((item) => item.id === selectedItemId)
-    const putItemMut = records.putItem
+    const queriedPath = keyQuery ? accessPaths.find((path) => path.index === keyQuery.index) : undefined
+    const showsProjection = mode === 'query' && queriedPath !== undefined && !queriedPath.projectsAllAttributes
+    const putItemMut = useMutation({
+        mutationFn: (document: Record<string, unknown>) => putFlatItem(cloud, 'nosql', tableName, document),
+        onSuccess: refreshRecords,
+    })
+
+    // A write can change both lists, whichever one is on screen.
+    function refreshRecords() {
+        scanned.refresh()
+        if (keyQuery) queried.refresh()
+    }
+
+    function runKeyQuery(query: KeyQuery) {
+        setKeyQueryRun((previous) => ({query, run: (previous?.run ?? 0) + 1}))
+    }
+
+    function changeMode(next: ReadMode) {
+        // The same id can be a full item in one mode and an index projection
+        // in the other, so a selection does not carry across.
+        if (next !== mode) setSelectedItemId(undefined)
+        setMode(next)
+    }
 
     return (
         <section className="dynamodb-explorer">
@@ -69,9 +111,23 @@ function TableExplorer({cloud, accountId, resource, runtimeReachable}: TableExpl
                     icon={<TableProperties size={15}/>}
                     eyebrow="Table explorer"
                     title={tableName}
-                    detail={`${records.items.length}${records.nextCursor ? '+' : ''} records`}
+                    detail={mode === 'query' && !keyQuery ? 'Enter a partition key to query' : recordCount(records)}
                 />
                 <div className="cosmos-toolbar">
+                    <div className="settings-toggle-group dynamodb-mode" role="radiogroup" aria-label="Read mode">
+                        {(['scan', 'query'] as const).map((option) => (
+                            <button
+                                key={option}
+                                type="button"
+                                className={`settings-toggle-btn${mode === option ? ' active' : ''}`}
+                                role="radio"
+                                aria-checked={mode === option}
+                                onClick={() => changeMode(option)}
+                            >
+                                {option === 'scan' ? 'Scan' : 'Query'}
+                            </button>
+                        ))}
+                    </div>
                     <button
                         className="button primary"
                         type="button"
@@ -84,10 +140,20 @@ function TableExplorer({cloud, accountId, resource, runtimeReachable}: TableExpl
                         <Plus size={14}/>
                         Add record
                     </button>
-                    <button className="button" type="button" disabled={records.isRefreshing} onClick={records.refresh}>
+                    <button className="button" type="button" disabled={records.isRefreshing || (mode === 'query' && !keyQuery)} onClick={records.refresh}>
                         <RefreshCw size={14}/>
                         {records.isRefreshing ? 'Loading' : 'Refresh'}
                     </button>
+                </div>
+                {/* Hidden rather than unmounted, so the inputs still match
+                    the query results when the user comes back from Scan. */}
+                <div hidden={mode !== 'query'}>
+                    <KeyQueryForm
+                        accessPaths={accessPaths}
+                        runtimeReachable={runtimeReachable}
+                        isRunning={queried.isRefreshing}
+                        onRun={runKeyQuery}
+                    />
                 </div>
                 {records.error && (
                     <div className="form-error">
@@ -95,17 +161,22 @@ function TableExplorer({cloud, accountId, resource, runtimeReachable}: TableExpl
                         {records.retry && <button className="button" type="button" onClick={records.retry}>Retry</button>}
                     </div>
                 )}
-                <RecordsTable records={records} selectedItemId={selectedItemId} onSelect={setSelectedItemId}/>
+                <RecordsTable
+                    records={records}
+                    emptyMessage={mode === 'query' ? 'No items match this key condition.' : 'This table does not contain any items.'}
+                    selectedItemId={selectedItemId}
+                    onSelect={setSelectedItemId}
+                />
             </div>
 
             <div className="cosmos-column">
-                <PanelHeader icon={<Braces size={15}/>} eyebrow="Record contents" title={selectedItem ? formatJson(itemKey(selectedItem)) : 'Select record'} detail="DynamoDB attributes normalized to JSON"/>
+                <PanelHeader icon={<Braces size={15}/>} eyebrow="Record contents" title={selectedItem ? formatJson(itemKey(selectedItem)) : 'Select record'} detail={showsProjection ? `Attributes projected into ${queriedPath?.index}` : 'DynamoDB attributes normalized to JSON'}/>
                 {selectedItem ? (
                     <pre className="dynamodb-document">{JSON.stringify(selectedItem.body, null, 2)}</pre>
                 ) : (
-                    <div className="empty compact"><h2>Select a record</h2><p>Full record contents appear here.</p></div>
+                    <div className="empty compact"><h2>Select a record</h2><p>{showsProjection ? 'Attributes projected into the index appear here.' : 'Full record contents appear here.'}</p></div>
                 )}
-                <PartiqlPanel cloud={cloud} tableName={tableName} runtimeReachable={runtimeReachable} onTableChanged={records.refresh}/>
+                <PartiqlPanel cloud={cloud} tableName={tableName} runtimeReachable={runtimeReachable} onTableChanged={refreshRecords}/>
             </div>
 
             <JsonRecordModal
@@ -119,6 +190,9 @@ function TableExplorer({cloud, accountId, resource, runtimeReachable}: TableExpl
                 onSubmit={(document) => putItemMut.mutate(document, {
                     onSuccess: (item) => {
                         setAddRecordOpen(false)
+                        // A query may not match the new item, so show it
+                        // among the scanned records, which always hold it.
+                        setMode('scan')
                         setSelectedItemId(item.id)
                     },
                 })}
@@ -127,7 +201,7 @@ function TableExplorer({cloud, accountId, resource, runtimeReachable}: TableExpl
     )
 }
 
-interface ScannedRecords {
+interface PagedRecords {
     items: ChildItem[]
     nextCursor: string | null
     isLoading: boolean
@@ -139,17 +213,25 @@ interface ScannedRecords {
     loadMore: () => void
     refresh: () => void
     retry: (() => void) | null
-    putItem: UseMutationResult<ChildItem, Error, Record<string, unknown>>
 }
 
-function useScannedRecords(cloud: CloudProvider, accountId: string, tableName: string, enabled: boolean): ScannedRecords {
+/**
+ * One query per loaded cursor page. The cursor chain belongs to the query key
+ * that produced it, so a new key starts again from the first page.
+ */
+function usePagedRecords(
+    pagesKey: readonly unknown[],
+    fetchPage: (cursor: string | undefined, signal: AbortSignal) => Promise<CollectionPage<ChildItem>>,
+    enabled: boolean,
+): PagedRecords {
     const qc = useQueryClient()
-    const [cursors, setCursors] = useState<Array<string | undefined>>([undefined])
-    const pagesKey = ['nosql-items', accountId, cloud, tableName]
+    const chainKey = JSON.stringify(pagesKey)
+    const [chain, setChain] = useState<{key: string; cursors: Array<string | undefined>}>({key: chainKey, cursors: [undefined]})
+    const cursors = chain.key === chainKey ? chain.cursors : [undefined]
     const pages = useQueries({
         queries: cursors.map((cursor) => ({
             queryKey: [...pagesKey, cursor],
-            queryFn: ({signal}: {signal: AbortSignal}) => listFlatItems(cloud, 'nosql', tableName, cursor, signal),
+            queryFn: ({signal}: {signal: AbortSignal}) => fetchPage(cursor, signal),
             enabled,
             refetchOnWindowFocus: false,
             refetchOnReconnect: false,
@@ -168,14 +250,9 @@ function useScannedRecords(cloud: CloudProvider, accountId: string, tableName: s
     // Back to a single page: refetching in place would join a fresh first
     // page to trailing pages built from the old cursor chain.
     function refresh() {
-        setCursors([undefined])
-        return qc.invalidateQueries({queryKey: pagesKey})
+        setChain({key: chainKey, cursors: [undefined]})
+        void qc.invalidateQueries({queryKey: pagesKey})
     }
-
-    const putItem = useMutation({
-        mutationFn: (document: Record<string, unknown>) => putFlatItem(cloud, 'nosql', tableName, document),
-        onSuccess: refresh,
-    })
 
     return {
         items,
@@ -187,15 +264,21 @@ function useScannedRecords(cloud: CloudProvider, accountId: string, tableName: s
         isFetching,
         error,
         loadMore: () => {
-            if (nextCursor && !isFetching) setCursors((previous) => [...previous, nextCursor])
+            if (nextCursor && !isFetching) setChain({key: chainKey, cursors: [...cursors, nextCursor]})
         },
-        refresh: () => void refresh(),
+        refresh,
         retry: failedPage ? () => void failedPage.refetch() : null,
-        putItem,
     }
 }
 
-function RecordsTable({records, selectedItemId, onSelect}: {records: ScannedRecords; selectedItemId?: string; onSelect: (id: string) => void}) {
+interface RecordsTableProps {
+    records: PagedRecords
+    emptyMessage: string
+    selectedItemId?: string
+    onSelect: (id: string) => void
+}
+
+function RecordsTable({records, emptyMessage, selectedItemId, onSelect}: RecordsTableProps) {
     return (
         <div className="cosmos-items-table">
             <table className="table">
@@ -219,7 +302,7 @@ function RecordsTable({records, selectedItemId, onSelect}: {records: ScannedReco
                 </tbody>
             </table>
             {records.isLoading && <div className="muted padded">Loading records</div>}
-            {records.isEmpty && <div className="empty compact"><h2>No records</h2><p>This table does not contain any items.</p></div>}
+            {records.isEmpty && <div className="empty compact"><h2>No records</h2><p>{emptyMessage}</p></div>}
             {records.nextCursor && (
                 <div className="dynamodb-load-more">
                     <button className="button" type="button" disabled={records.isFetching} onClick={records.loadMore}>
@@ -228,6 +311,127 @@ function RecordsTable({records, selectedItemId, onSelect}: {records: ScannedReco
                 </div>
             )}
         </div>
+    )
+}
+
+const SORT_KEY_OPERATORS: Array<{value: KeyConditionOperator; label: string}> = [
+    {value: 'eq', label: '='},
+    {value: 'lt', label: '<'},
+    {value: 'lte', label: '<='},
+    {value: 'gt', label: '>'},
+    {value: 'gte', label: '>='},
+    {value: 'between', label: 'Between'},
+    {value: 'beginsWith', label: 'Begins with'},
+]
+
+interface KeyQueryFormProps {
+    accessPaths: DynamoAccessPath[]
+    runtimeReachable: boolean
+    isRunning: boolean
+    onRun: (query: KeyQuery) => void
+}
+
+function KeyQueryForm({accessPaths, runtimeReachable, isRunning, onRun}: KeyQueryFormProps) {
+    const id = useId()
+    const [pathId, setPathId] = useState('')
+    const [partitionValue, setPartitionValue] = useState('')
+    const [operator, setOperator] = useState<KeyConditionOperator | ''>('')
+    const [sortValue, setSortValue] = useState('')
+    const [sortTo, setSortTo] = useState('')
+    const [descending, setDescending] = useState(false)
+    const path = accessPaths.find((candidate) => (candidate.index ?? '') === pathId) ?? accessPaths[0]
+
+    if (!path) {
+        return <div className="empty compact"><h2>No key schema</h2><p>This table does not describe a partition key to query.</p></div>
+    }
+
+    const sortKey = path.sortKey
+    // begins_with only applies to string and binary sort keys.
+    const operators = SORT_KEY_OPERATORS.filter(({value}) => value !== 'beginsWith' || sortKey?.type !== 'N')
+    const activeOperator = sortKey && operators.some(({value}) => value === operator) ? operator : ''
+    const canRun = runtimeReachable && !isRunning && Boolean(partitionValue)
+        && (!activeOperator || Boolean(sortValue))
+        && (activeOperator !== 'between' || Boolean(sortTo))
+
+    function submit(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault()
+        if (!canRun || !path) return
+        const query: KeyQuery = {partitionKey: partitionValue}
+        if (path.index) query.index = path.index
+        if (activeOperator) {
+            query.sortKey = activeOperator === 'between'
+                ? {operator: activeOperator, value: sortValue, to: sortTo}
+                : {operator: activeOperator, value: sortValue}
+        }
+        if (descending) query.descending = true
+        onRun(query)
+    }
+
+    return (
+        <form className="cosmos-query" aria-label="Query by key" onSubmit={submit}>
+            <div className="field-row">
+                <label htmlFor={`${id}-path`}>Table or index</label>
+                <select id={`${id}-path`} className="input" value={path.index ?? ''} onChange={(event) => setPathId(event.target.value)}>
+                    {accessPaths.map((candidate) => (
+                        <option key={candidate.index ?? ''} value={candidate.index ?? ''}>{candidate.label}</option>
+                    ))}
+                </select>
+            </div>
+            <div className="field-row">
+                <label htmlFor={`${id}-pk`}>Partition key</label>
+                <input
+                    id={`${id}-pk`}
+                    className="input"
+                    value={partitionValue}
+                    placeholder={keyPlaceholder(path.partitionKey)}
+                    onChange={(event) => setPartitionValue(event.target.value)}
+                />
+            </div>
+            {sortKey && (
+                <div className="field-row">
+                    <label htmlFor={`${id}-op`}>Sort key</label>
+                    <select
+                        id={`${id}-op`}
+                        className="input"
+                        aria-label="Sort key condition"
+                        value={activeOperator}
+                        onChange={(event) => setOperator(event.target.value as KeyConditionOperator | '')}
+                    >
+                        <option value="">Any {sortKey.name}</option>
+                        {operators.map(({value, label}) => <option key={value} value={value}>{label}</option>)}
+                    </select>
+                    {activeOperator && (
+                        <input
+                            className="input"
+                            aria-label={activeOperator === 'between' ? 'Sort key lower bound' : 'Sort key value'}
+                            value={sortValue}
+                            placeholder={keyPlaceholder(sortKey)}
+                            onChange={(event) => setSortValue(event.target.value)}
+                        />
+                    )}
+                    {activeOperator === 'between' && (
+                        <input
+                            className="input"
+                            aria-label="Sort key upper bound"
+                            value={sortTo}
+                            placeholder={keyPlaceholder(sortKey)}
+                            onChange={(event) => setSortTo(event.target.value)}
+                        />
+                    )}
+                </div>
+            )}
+            <div className="field-row">
+                <label htmlFor={`${id}-order`}>Order</label>
+                <select id={`${id}-order`} className="input" value={descending ? 'desc' : 'asc'} onChange={(event) => setDescending(event.target.value === 'desc')}>
+                    <option value="asc">Ascending</option>
+                    <option value="desc">Descending</option>
+                </select>
+            </div>
+            <button className="button" type="submit" disabled={!canRun}>
+                <Search size={14}/>
+                {isRunning ? 'Running' : 'Run query'}
+            </button>
+        </form>
     )
 }
 
@@ -323,10 +527,20 @@ function PartiqlPanel({cloud, tableName, runtimeReachable, onTableChanged}: Part
 interface DynamoKeyField {
     name: string
     type?: 'S' | 'N' | 'B'
+    keyType?: 'HASH' | 'RANGE'
 }
 
-function dynamoKeyFields(resource?: CloudResource): DynamoKeyField[] {
-    const keySchema = Array.isArray(resource?.metadata.keySchema) ? resource.metadata.keySchema : []
+/** The table itself or one of its secondary indexes, as Query can read it. */
+interface DynamoAccessPath {
+    index?: string
+    label: string
+    partitionKey: DynamoKeyField
+    sortKey?: DynamoKeyField
+    /** False for a KEYS_ONLY or INCLUDE index, whose rows are partial items. */
+    projectsAllAttributes: boolean
+}
+
+function dynamoKeyFields(resource?: CloudResource, keySchema: unknown = resource?.metadata.keySchema): DynamoKeyField[] {
     const definitions = Array.isArray(resource?.metadata.attributeDefinitions) ? resource.metadata.attributeDefinitions : []
     const types = new Map(definitions.flatMap((definition) => {
         if (!definition || typeof definition !== 'object') return []
@@ -334,11 +548,42 @@ function dynamoKeyFields(resource?: CloudResource): DynamoKeyField[] {
         return typeof AttributeName === 'string' && isDynamoKeyType(AttributeType) ? [[AttributeName, AttributeType] as const] : []
     }))
 
-    return keySchema.flatMap((key) => {
+    return (Array.isArray(keySchema) ? keySchema : []).flatMap((key) => {
         if (!key || typeof key !== 'object') return []
-        const name = (key as {AttributeName?: unknown}).AttributeName
-        return typeof name === 'string' ? [{name, type: types.get(name)}] : []
+        const {AttributeName: name, KeyType: keyType} = key as {AttributeName?: unknown; KeyType?: unknown}
+        if (typeof name !== 'string') return []
+        return [{name, type: types.get(name), keyType: keyType === 'HASH' || keyType === 'RANGE' ? keyType : undefined}]
     })
+}
+
+function dynamoAccessPaths(resource: CloudResource): DynamoAccessPath[] {
+    const indexes = (kind: string, value: unknown) => (Array.isArray(value) ? value : []).flatMap((index) => {
+        if (!index || typeof index !== 'object') return []
+        const {IndexName, KeySchema, Projection} = index as {IndexName?: unknown; KeySchema?: unknown; Projection?: {ProjectionType?: unknown}}
+        if (typeof IndexName !== 'string') return []
+        return [{index: IndexName, kind, keySchema: KeySchema, projectsAllAttributes: Projection?.ProjectionType === 'ALL'}]
+    })
+    const candidates: Array<{index?: string; kind: string; keySchema: unknown; projectsAllAttributes: boolean}> = [
+        {index: undefined, kind: 'Table', keySchema: resource.metadata.keySchema, projectsAllAttributes: true},
+        ...indexes('GSI', resource.metadata.globalSecondaryIndexes),
+        ...indexes('LSI', resource.metadata.localSecondaryIndexes),
+    ]
+
+    return candidates.flatMap(({index, kind, keySchema, projectsAllAttributes}) => {
+        const fields = dynamoKeyFields(resource, keySchema)
+        const partitionKey = fields.find(({keyType}) => keyType === 'HASH')
+        if (!partitionKey) return []
+        const sortKey = fields.find(({keyType}) => keyType === 'RANGE')
+        const keys = [partitionKey, sortKey].filter(Boolean).map((field) => field?.name).join(', ')
+        return [{index, label: `${kind}: ${index ?? resource.name} (${keys})`, partitionKey, sortKey, projectsAllAttributes}]
+    })
+}
+
+// The visible labels say which key it is; the placeholder names the attribute.
+function keyPlaceholder({name, type}: DynamoKeyField): string {
+    if (type === 'N') return `${name} (number)`
+    if (type === 'B') return `${name} (base64)`
+    return type === 'S' ? `${name} (string)` : name
 }
 
 function dynamoModalDescription(keyFields: DynamoKeyField[]): string {
@@ -368,6 +613,12 @@ function PanelHeader({icon, eyebrow, title, detail}: {icon: React.ReactNode; eye
 function itemKey(item: ChildItem): Record<string, unknown> | null {
     const key = item.metadata.key
     return key && typeof key === 'object' && !Array.isArray(key) ? key as Record<string, unknown> : null
+}
+
+// "1+ records" stays plural: more pages mean more than one.
+function recordCount({items, nextCursor}: PagedRecords): string {
+    if (nextCursor) return `${items.length}+ records`
+    return `${items.length} ${items.length === 1 ? 'record' : 'records'}`
 }
 
 function summarize(item: ChildItem): string {
