@@ -194,7 +194,7 @@ describe('AwsSqsAdapter', () => {
         })
     })
 
-    test('resolves maximumMessageSize from KB (schema field) and bytes or units (direct calls)', async () => {
+    test('resolves maximumMessageSize from KB (schema field) and raw bytes (direct calls)', async () => {
         // UI field maximumMessageSizeKb
         const {client: client1, sent: sent1} = stubSqs()
         await new AwsSqsAdapter(client1).create({
@@ -226,27 +226,6 @@ describe('AwsSqsAdapter', () => {
         })
         const cmd3 = sent3.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
         expect(cmd3.input.Attributes?.MaximumMessageSize).toBe('1024')
-
-        // Direct API call: explicit units
-        const {client: client4, sent: sent4} = stubSqs()
-        await new AwsSqsAdapter(client4).create({
-            values: {
-                queueName: 'orders-queue',
-                maximumMessageSize: '1024 KB',
-            },
-        })
-        const cmd4 = sent4.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
-        expect(cmd4.input.Attributes?.MaximumMessageSize).toBe('1048576')
-
-        const {client: client5, sent: sent5} = stubSqs()
-        await new AwsSqsAdapter(client5).create({
-            values: {
-                queueName: 'orders-queue',
-                maximumMessageSize: '1MB',
-            },
-        })
-        const cmd5 = sent5.find((c) => c instanceof CreateQueueCommand) as CreateQueueCommand
-        expect(cmd5.input.Attributes?.MaximumMessageSize).toBe('1048576')
     })
 
     test('omits the attributes block when nothing was supplied', async () => {

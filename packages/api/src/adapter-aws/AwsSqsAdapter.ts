@@ -311,7 +311,7 @@ function numericAttribute(value: unknown, field: string, min: number, max: numbe
  *
  * Accepts either:
  * - `maximumMessageSizeKb`: A value in KB between 1 and 1,024 (as configured in the schema), converting it to bytes.
- * - `maximumMessageSize`: Raw byte count (1,024 - 1,048,576) or with explicit unit (e.g., '1024 B', '256 KB', '1 MB', '1024 KiB').
+ * - `maximumMessageSize`: Raw byte count (1,024 - 1,048,576) for direct API callers.
  *
  * Returns '' when blank.
  */
@@ -324,20 +324,6 @@ function resolveMaximumMessageSize(values: Record<string, unknown>): string {
 
     const raw = stringValue(values.maximumMessageSize)
     if (!raw) return ''
-
-    const unitMatch = raw.match(/^(\d+)\s*(b|bytes?|kb|kib|mb|mib)$/i)
-    if (unitMatch) {
-        const amount = Number(unitMatch[1])
-        const unit = unitMatch[2].toLowerCase()
-        let bytes: number
-        if (unit.startsWith('m')) bytes = amount * 1024 * 1024
-        else if (unit.startsWith('k')) bytes = amount * 1024
-        else bytes = amount
-        if (bytes < 1024 || bytes > 1_048_576) {
-            throw new ValidationError('maximumMessageSize must be between 1024 bytes (1 KB) and 1048576 bytes (1 MB).')
-        }
-        return String(bytes)
-    }
 
     if (!/^\d+$/.test(raw)) {
         throw new ValidationError('maximumMessageSize must be a whole number of bytes between 1024 and 1048576.')
