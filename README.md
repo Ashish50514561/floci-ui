@@ -192,7 +192,7 @@ Set in `packages/api/.env` (defaults shown).
 | `PORT` | `4501` |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:4500` |
 
-`CORS_ALLOWED_ORIGINS` is a comma separated allow-list. It only gates the Secrets Manager routes and KMS encrypt and decrypt; the console reaches the API same-origin and does not need it.
+`CORS_ALLOWED_ORIGINS` is a comma separated allow-list. It gates Secrets Manager and KMS encrypt, decrypt, sign, verify, rotate, and cancel-deletion routes. The bodyless key mutation routes also reject untrusted browser origins on the request itself. The console reaches the API same-origin and does not need an allow-list entry.
 
 ### Remote hosts and reverse proxies
 

@@ -19,7 +19,7 @@ export interface ApiBindings {
 export function createApiApp(cloudRoutes: Hono = clouds) {
   const app = new Hono<{ Bindings: ApiBindings }>();
 
-  // Secrets Manager and KMS crypto routes handle sensitive values with server-side
+  // Secrets Manager and KMS routes handle sensitive values with server-side
   // AWS credentials, so an unrestricted `cors()` would let any web page in the
   // browser drive them cross-origin. Restrict CORS to trusted origins for those
   // routes and keep the permissive default elsewhere. In production the frontend
@@ -35,6 +35,20 @@ export function createApiApp(cloudRoutes: Hono = clouds) {
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+
+  app.use("*", async (c, next) => {
+    const origin = c.req.header("origin");
+    if (
+      c.req.method === "POST" &&
+      isKeyMutationRoute(c.req.path) &&
+      origin &&
+      origin !== new URL(c.req.url).origin &&
+      !trustedOrigins.includes(origin)
+    ) {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+    await next();
+  });
 
   app.use(
     "*",
@@ -73,6 +87,10 @@ export function createBunFetch(app: ReturnType<typeof createApiApp>) {
 function isSensitiveCredentialRoute(path: string): boolean {
   return (
     path.startsWith("/api/secretsmanager") ||
-    /^\/api\/clouds\/[^/]+\/services\/kms\/resources\/[^/]+\/(?:encrypt|decrypt)$/.test(path)
+    /^\/api\/clouds\/[^/]+\/services\/kms\/resources\/[^/]+\/(?:encrypt|decrypt|sign|verify|rotate|cancel-deletion)$/.test(path)
   );
+}
+
+function isKeyMutationRoute(path: string): boolean {
+  return /^\/api\/clouds\/[^/]+\/services\/kms\/resources\/[^/]+\/(?:rotate|cancel-deletion)$/.test(path);
 }
