@@ -26,7 +26,9 @@ import { ECRClient } from "@aws-sdk/client-ecr";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { Route53Client } from "@aws-sdk/client-route-53";
 
-const endpoint = process.env.FLOCI_ENDPOINT;
+// Same default as runtimeProbe and the SES adapter. Without one, the SDK would
+// send every call to real AWS.
+const endpoint = process.env.FLOCI_ENDPOINT || "http://localhost:4566";
 const region = process.env.AWS_REGION || "us-east-1";
 
 // Floci derives the AWS account from AWS_ACCESS_KEY_ID: a value that is exactly
@@ -91,7 +93,8 @@ function buildClients(accountId: string): AwsClients {
   const base = {
     region,
     credentials: { accessKeyId: accountId, secretAccessKey: SECRET_ACCESS_KEY },
-    ...(endpoint ? { endpoint, forcePathStyle: true } : {}),
+    endpoint,
+    forcePathStyle: true,
   };
   return {
     s3: new S3Client({ ...base, forcePathStyle: true }),
