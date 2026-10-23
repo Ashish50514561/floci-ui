@@ -42,6 +42,7 @@
     "hono": "^4.13.9",
     "mssql": "^12.7.2",
     "pg": "^8.22.0",
+    "postal-mime": "2.7.5",
     "saxes": "^6.0.0"
   },
   "devDependencies": {

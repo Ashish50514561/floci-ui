@@ -42,6 +42,7 @@ import {CloudAdapterRegistry} from '../registry/CloudAdapterRegistry'
 import {CloudProxyService} from '../service/CloudProxyService'
 import type {RuntimeProbe} from '../service/runtimeProbe'
 import {DELETE_BATCH_TIMEOUT_MS} from '../adapter-aws/AwsStorageAdapter'
+import {AwsSesAdapter} from '../adapter-aws/AwsSesAdapter'
 import {createCloudRoutes, EMPTY_BUCKET_DEADLINE_MS, EMPTY_BUCKET_IDLE_TIMEOUT_SECONDS} from './clouds'
 
 function mockAdapter(cloud: CloudProvider, overrides: Partial<CloudServiceAdapter> = {}): CloudServiceAdapter {
@@ -472,6 +473,39 @@ describe('cloud schema routes', () => {
         expect(res.status).toBe(201)
         expect(body.metadata.key).toEqual({pk: 'item-1'})
         expect(calls).toEqual([{resourceId: 'orders', body: {pk: 'item-1', name: 'First item'}}])
+    })
+
+    test('returns raw MIME email search results and previews through the real routes and adapter', async () => {
+        const raw = Buffer.from([
+            'From: sender@example.test',
+            'To: recipient@example.test',
+            'Subject: Raw email through the router',
+            'MIME-Version: 1.0',
+            'Content-Type: text/html; charset=UTF-8',
+            '', '<p>Rendered through the mailbox API.</p>',
+        ].join('\r\n')).toString('base64')
+        const adapter = new AwsSesAdapter('http://floci.test', async () => Response.json({
+            messages: [{Id: 'raw-router-email', RawData: raw}],
+        }))
+        const app = appWithRoutes([adapter])
+
+        const list = await app.request('/api/clouds/aws/services/email/resources?search=recipient%40example.test')
+        const resources = await list.json()
+
+        expect(list.status).toBe(200)
+        expect(resources).toHaveLength(1)
+        expect(resources[0]).toMatchObject({
+            id: 'raw-router-email', name: 'Raw email through the router',
+            metadata: {
+                source: 'sender@example.test', toAddresses: ['recipient@example.test'],
+                htmlBody: expect.stringContaining('<p>Rendered through the mailbox API.</p>'),
+                rawData: raw,
+            },
+        })
+
+        const detail = await app.request('/api/clouds/aws/services/email/resources/raw-router-email')
+        expect(detail.status).toBe(200)
+        expect(await detail.json()).toEqual(resources[0])
     })
 
     test('clears the SES mailbox through the email adapter', async () => {
