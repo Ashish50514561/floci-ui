@@ -593,7 +593,7 @@ export const endpointRegistry: EndpointRegistry = new Map([
   [
     apiEndpointKeys.clouds.database.sql.databases,
     {
-      path: "/clouds/:cloud/services/database/resources/:id/sql/databases",
+      path: "/clouds/:cloud/services/:service/resources/:id/sql/databases",
       method: "POST",
       telemetry: { service: "cloud-proxy" },
     },
@@ -601,7 +601,7 @@ export const endpointRegistry: EndpointRegistry = new Map([
   [
     apiEndpointKeys.clouds.database.sql.tables,
     {
-      path: "/clouds/:cloud/services/database/resources/:id/sql/tables",
+      path: "/clouds/:cloud/services/:service/resources/:id/sql/tables",
       method: "POST",
       telemetry: { service: "cloud-proxy" },
     },
@@ -609,7 +609,7 @@ export const endpointRegistry: EndpointRegistry = new Map([
   [
     apiEndpointKeys.clouds.database.sql.query,
     {
-      path: "/clouds/:cloud/services/database/resources/:id/sql/query",
+      path: "/clouds/:cloud/services/:service/resources/:id/sql/query",
       method: "POST",
       telemetry: { service: "cloud-proxy" },
     },

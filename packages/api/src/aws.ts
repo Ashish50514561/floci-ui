@@ -19,16 +19,19 @@ import { APIGatewayClient } from "@aws-sdk/client-api-gateway";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { AppConfigClient } from "@aws-sdk/client-appconfig";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
+import { DSQLClient } from "@aws-sdk/client-dsql";
 import { KinesisClient } from "@aws-sdk/client-kinesis";
 import { SageMakerClient } from "@aws-sdk/client-sagemaker";
 import { ECSClient } from "@aws-sdk/client-ecs";
 import { ECRClient } from "@aws-sdk/client-ecr";
 import { CloudFrontClient } from "@aws-sdk/client-cloudfront";
 import { Route53Client } from "@aws-sdk/client-route-53";
+import { STSClient } from "@aws-sdk/client-sts";
 
 // Same default as runtimeProbe and the SES adapter. Without one, the SDK would
-// send every call to real AWS.
-const endpoint = process.env.FLOCI_ENDPOINT || "http://localhost:4566";
+// send every call to real AWS. Adapters that reach Floci beyond the SDK, such
+// as Aurora DSQL's data connection, use it too.
+export const endpoint = process.env.FLOCI_ENDPOINT || "http://localhost:4566";
 const region = process.env.AWS_REGION || "us-east-1";
 
 // Floci derives the AWS account from AWS_ACCESS_KEY_ID: a value that is exactly
@@ -83,6 +86,8 @@ export type AwsClients = {
   ecr: ECRClient;
   cloudfront: CloudFrontClient;
   route53: Route53Client;
+  dsql: DSQLClient;
+  sts: STSClient;
 };
 
 export type AwsClientName = keyof AwsClients;
@@ -124,6 +129,8 @@ function buildClients(accountId: string): AwsClients {
     ecr: new ECRClient(base),
     cloudfront: new CloudFrontClient(base),
     route53: new Route53Client(base),
+    dsql: new DSQLClient(base),
+    sts: new STSClient(base),
   };
 }
 
