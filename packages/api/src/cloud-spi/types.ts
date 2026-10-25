@@ -95,6 +95,10 @@ export interface FieldSchema {
     options?: Array<{label: string; value: string}>
 }
 
+/** The power verbs a compute adapter may implement, reached through `/compute/resources/:id/<verb>`. */
+export const COMPUTE_POWER_ACTIONS = ['start', 'stop', 'reboot'] as const
+export type ComputePowerAction = (typeof COMPUTE_POWER_ACTIONS)[number]
+
 /**
  * Verbs a service can advertise. `ActionSchema` drives which controls the
  * generic view renders; `ResourceActionName` additionally covers lifecycle verbs
