@@ -274,6 +274,7 @@ export const GCP_INSTANCE_NAME_PATTERN = '^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
 
 const gcpComputeColumns: TableColumnSchema[] = [
     {name: 'name', label: 'Name'},
+    {name: 'type', label: 'Kind', format: 'badge'},
     {name: 'status', label: 'Status', format: 'badge'},
     {name: 'instanceClass', label: 'Machine Type'},
     {name: 'region', label: 'Zone'},
@@ -376,5 +377,6 @@ export function gcpComputeSchema(): ServiceSchema {
         },
         filters: computeFilters,
         columns: gcpComputeColumns,
+        notice: 'Floci-GCP emulates the Compute Engine control plane: instances are records and run no guest operating system. Disks are listed and inspected only.',
     }
 }
