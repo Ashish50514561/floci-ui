@@ -20,6 +20,7 @@ import {
     DeleteKeyPairCommand,
     DeleteNatGatewayCommand,
     DeleteRouteCommand,
+    DeleteRouteTableCommand,
     DeleteSecurityGroupCommand,
     DeleteSubnetCommand,
     DeleteTagsCommand,
@@ -686,6 +687,258 @@ describe('ec2Service VPC wizard subnet boundaries', () => {
         expect(subnets[0].input).toMatchObject({VpcId: 'vpc-small', CidrBlock: '10.0.0.0/28'})
         const route = sent.find((command) => command instanceof CreateRouteCommand) as CreateRouteCommand
         expect(route.input).toMatchObject({RouteTableId: 'rtb-small', DestinationCidrBlock: '0.0.0.0/0', GatewayId: 'igw-small'})
+    })
+})
+
+describe('ec2Service VPC wizard rollback', () => {
+    test('removes resources created before a later subnet fails', async () => {
+        const sent: unknown[] = []
+        const failure = new Error('InvalidSubnet.Range')
+        let subnetCount = 0
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) {
+                    if (++subnetCount === 2) throw failure
+                    return {Subnet: {SubnetId: 'subnet-1'}}
+                }
+                return {}
+            },
+        } as unknown as EC2Client
+
+        await expect(createEc2Service(client).createVpcWizard({
+            name: 'partial-vpc', cidrBlock: '10.0.0.0/24',
+            subnetGroups: [{name: 'public', count: 2, isPublic: true, prefix: 28}],
+            natGateway: false,
+        })).rejects.toBe(failure)
+
+        expect(sent.slice(-4).map((command) => command?.constructor.name)).toEqual([
+            'DeleteSubnetCommand', 'DetachInternetGatewayCommand',
+            'DeleteInternetGatewayCommand', 'DeleteVpcCommand',
+        ])
+        expect((sent.at(-4) as DeleteSubnetCommand).input).toEqual({SubnetId: 'subnet-1'})
+        expect((sent.at(-1) as DeleteVpcCommand).input).toEqual({VpcId: 'vpc-1'})
+    })
+
+    test('disassociates the route table before removing subnets after a later failure', async () => {
+        const sent: unknown[] = []
+        const failure = new Error('address allocation failed')
+        let subnetCount = 0
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) return {Subnet: {SubnetId: `subnet-${++subnetCount}`}}
+                if (command instanceof CreateRouteTableCommand) return {RouteTable: {RouteTableId: 'rtb-1'}}
+                if (command instanceof AssociateRouteTableCommand) return {AssociationId: 'rtbassoc-1'}
+                if (command instanceof AllocateAddressCommand) throw failure
+                return {}
+            },
+        } as unknown as EC2Client
+
+        await expect(createEc2Service(client).createVpcWizard({
+            name: 'partial-vpc', cidrBlock: '10.0.0.0/24',
+            subnetGroups: [
+                {name: 'public', count: 1, isPublic: true, prefix: 28},
+                {name: 'private', count: 1, isPublic: false, prefix: 28},
+            ],
+            natGateway: true,
+        })).rejects.toBe(failure)
+
+        expect(sent.slice(-7).map((command) => command?.constructor.name)).toEqual([
+            'DisassociateRouteTableCommand', 'DeleteRouteTableCommand',
+            'DeleteSubnetCommand', 'DeleteSubnetCommand',
+            'DetachInternetGatewayCommand', 'DeleteInternetGatewayCommand', 'DeleteVpcCommand',
+        ])
+        expect((sent.at(-7) as DisassociateRouteTableCommand).input).toEqual({AssociationId: 'rtbassoc-1'})
+    })
+
+    test('releases the allocated address when NAT creation is unsupported', async () => {
+        const sent: unknown[] = []
+        let subnetCount = 0
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) return {Subnet: {SubnetId: `subnet-${++subnetCount}`}}
+                if (command instanceof CreateRouteTableCommand) return {RouteTable: {RouteTableId: 'rtb-1'}}
+                if (command instanceof AssociateRouteTableCommand) return {AssociationId: 'rtbassoc-1'}
+                if (command instanceof AllocateAddressCommand) return {AllocationId: 'eipalloc-1'}
+                if (command instanceof CreateNatGatewayCommand) throw new Error('CreateNatGateway is not supported')
+                return {}
+            },
+        } as unknown as EC2Client
+
+        const result = await createEc2Service(client).createVpcWizard({
+            name: 'without-nat', cidrBlock: '10.0.0.0/24',
+            subnetGroups: [
+                {name: 'public', count: 1, isPublic: true, prefix: 28},
+                {name: 'private', count: 1, isPublic: false, prefix: 28},
+            ],
+            natGateway: true,
+        })
+
+        expect(result.natGatewayId).toBeUndefined()
+        expect(sent.at(-1)).toBeInstanceOf(ReleaseAddressCommand)
+        expect((sent.at(-1) as ReleaseAddressCommand).input).toEqual({AllocationId: 'eipalloc-1'})
+    })
+
+    test('deletes a created NAT gateway before releasing its address', async () => {
+        const sent: unknown[] = []
+        const failure = new Error('NAT tagging failed')
+        let subnetCount = 0
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) return {Subnet: {SubnetId: `subnet-${++subnetCount}`}}
+                if (command instanceof CreateRouteTableCommand) return {RouteTable: {RouteTableId: 'rtb-1'}}
+                if (command instanceof AssociateRouteTableCommand) return {AssociationId: 'rtbassoc-1'}
+                if (command instanceof AllocateAddressCommand) return {AllocationId: 'eipalloc-1'}
+                if (command instanceof CreateNatGatewayCommand) return {NatGateway: {NatGatewayId: 'nat-1'}}
+                if (command instanceof CreateTagsCommand && command.input.Resources?.includes('nat-1')) throw failure
+                if (command instanceof DescribeNatGatewaysCommand) return {NatGateways: [{State: 'deleted'}]}
+                return {}
+            },
+        } as unknown as EC2Client
+
+        await expect(createEc2Service(client).createVpcWizard({
+            name: 'partial-nat', cidrBlock: '10.0.0.0/24',
+            subnetGroups: [
+                {name: 'public', count: 1, isPublic: true, prefix: 28},
+                {name: 'private', count: 1, isPublic: false, prefix: 28},
+            ],
+            natGateway: true,
+        })).rejects.toBe(failure)
+
+        const commands = sent.map((command) => command?.constructor.name)
+        const deleteNat = commands.indexOf('DeleteNatGatewayCommand')
+        const releaseAddress = commands.indexOf('ReleaseAddressCommand')
+        const deleteVpc = commands.indexOf('DeleteVpcCommand')
+        expect(deleteNat).toBeGreaterThan(-1)
+        expect(releaseAddress).toBeGreaterThan(deleteNat)
+        expect(deleteVpc).toBeGreaterThan(releaseAddress)
+    })
+
+    test('waits for NAT deletion before releasing resources it still uses', async () => {
+        const sent: unknown[] = []
+        const failure = new Error('NAT tagging failed')
+        let subnetCount = 0
+        let deletingPolls = 0
+        let natDeleted = false
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) return {Subnet: {SubnetId: `subnet-${++subnetCount}`}}
+                if (command instanceof CreateRouteTableCommand) return {RouteTable: {RouteTableId: 'rtb-1'}}
+                if (command instanceof AssociateRouteTableCommand) return {AssociationId: 'rtbassoc-1'}
+                if (command instanceof AllocateAddressCommand) return {AllocationId: 'eipalloc-1'}
+                if (command instanceof CreateNatGatewayCommand) return {NatGateway: {NatGatewayId: 'nat-1'}}
+                if (command instanceof CreateTagsCommand && command.input.Resources?.includes('nat-1')) throw failure
+                if (command instanceof DescribeNatGatewaysCommand) {
+                    natDeleted = ++deletingPolls > 16
+                    return {NatGateways: [{State: natDeleted ? 'deleted' : 'deleting'}]}
+                }
+                if ((command instanceof ReleaseAddressCommand || command instanceof DeleteSubnetCommand) && !natDeleted) {
+                    throw new Error('DependencyViolation')
+                }
+                return {}
+            },
+        } as unknown as EC2Client
+
+        await expect(createEc2Service(client).createVpcWizard({
+            name: 'slow-nat', cidrBlock: '10.0.0.0/24',
+            subnetGroups: [
+                {name: 'public', count: 1, isPublic: true, prefix: 28},
+                {name: 'private', count: 1, isPublic: false, prefix: 28},
+            ],
+            natGateway: true,
+        })).rejects.toBe(failure)
+
+        expect(deletingPolls).toBe(17)
+        expect(sent.some((command) => command instanceof ReleaseAddressCommand)).toBe(true)
+        expect(sent.at(-1)).toBeInstanceOf(DeleteVpcCommand)
+    }, 25_000)
+
+    test('omits a private route table rolled back after unsupported route creation', async () => {
+        let subnetCount = 0
+        let routeTableCount = 0
+        let natDeleting = false
+        const sent: unknown[] = []
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) return {Subnet: {SubnetId: `subnet-${++subnetCount}`}}
+                if (command instanceof CreateRouteTableCommand) return {RouteTable: {RouteTableId: `rtb-${++routeTableCount}`}}
+                if (command instanceof AssociateRouteTableCommand) return {AssociationId: 'rtbassoc-1'}
+                if (command instanceof AllocateAddressCommand) return {AllocationId: 'eipalloc-1'}
+                if (command instanceof CreateNatGatewayCommand) return {NatGateway: {NatGatewayId: 'nat-1'}}
+                if (command instanceof DeleteNatGatewayCommand) natDeleting = true
+                if (command instanceof DescribeNatGatewaysCommand) {
+                    return {NatGateways: [{State: natDeleting ? 'deleted' : 'available'}]}
+                }
+                if (command instanceof CreateRouteCommand && command.input.NatGatewayId) {
+                    throw new Error('CreateRoute is not supported')
+                }
+                return {}
+            },
+        } as unknown as EC2Client
+
+        const result = await createEc2Service(client).createVpcWizard({
+            name: 'without-private-route', cidrBlock: '10.0.0.0/24',
+            subnetGroups: [
+                {name: 'public', count: 1, isPublic: true, prefix: 28},
+                {name: 'private', count: 1, isPublic: false, prefix: 28},
+            ],
+            natGateway: true,
+        })
+
+        expect(sent.some((command) => command instanceof DeleteRouteTableCommand && command.input.RouteTableId === 'rtb-2')).toBe(true)
+        expect(result.privateRouteTableId).toBeUndefined()
+        expect(result.natGatewayId).toBeUndefined()
+    })
+
+    test('keeps the original failure and continues cleanup if one deletion fails', async () => {
+        const sent: unknown[] = []
+        const failure = new Error('subnet creation failed')
+        let subnetCount = 0
+        const client: EC2Client = {
+            send: async (command: unknown) => {
+                sent.push(command)
+                if (command instanceof CreateVpcCommand) return {Vpc: {VpcId: 'vpc-1'}}
+                if (command instanceof CreateInternetGatewayCommand) return {InternetGateway: {InternetGatewayId: 'igw-1'}}
+                if (command instanceof CreateSubnetCommand) {
+                    if (++subnetCount === 2) throw failure
+                    return {Subnet: {SubnetId: 'subnet-1'}}
+                }
+                if (command instanceof DeleteSubnetCommand) throw new Error('deletion failed')
+                return {}
+            },
+        } as unknown as EC2Client
+        const warn = console.warn
+        const warnings: unknown[][] = []
+        console.warn = (...args: unknown[]) => { warnings.push(args) }
+        try {
+            await expect(createEc2Service(client).createVpcWizard({
+                name: 'partial-vpc', cidrBlock: '10.0.0.0/24',
+                subnetGroups: [{name: 'public', count: 2, isPublic: true, prefix: 28}],
+                natGateway: false,
+            })).rejects.toBe(failure)
+        } finally {
+            console.warn = warn
+        }
+
+        expect(warnings).toHaveLength(1)
+        expect(sent.at(-1)).toBeInstanceOf(DeleteVpcCommand)
     })
 })
 

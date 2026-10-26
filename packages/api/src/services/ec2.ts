@@ -1057,96 +1057,152 @@ export function createEc2Service(
             const layoutError = validateSubnetLayout(cidrBlock, subnetGroups)
             if (layoutError) throw new Error(layoutError)
             const groupCidrs = calculateSubnetCidrs(cidrBlock, subnetGroups)
-
-            // 1. VPC
-            const vpcRes = await client.send(new CreateVpcCommand({CidrBlock: cidrBlock}))
-            const vpcId = vpcRes.Vpc!.VpcId!
-            await client.send(new CreateTagsCommand({Resources: [vpcId], Tags: [{Key: 'Name', Value: name}]}))
-
-            // 2. Internet Gateway
-            const igwRes = await client.send(new CreateInternetGatewayCommand({}))
-            const igwId = igwRes.InternetGateway!.InternetGatewayId!
-            await client.send(new CreateTagsCommand({Resources: [igwId], Tags: [{Key: 'Name', Value: `${name}-igw`}]}))
-            await client.send(new AttachInternetGatewayCommand({InternetGatewayId: igwId, VpcId: vpcId}))
-
-            // 3. Create subnets per group
-            const createdGroups: Array<{name: string; isPublic: boolean; subnetIds: string[]}> = []
-            for (let gi = 0; gi < subnetGroups.length; gi++) {
-                const group = subnetGroups[gi]
-                const subnetIds: string[] = []
-                for (let i = 0; i < group.count; i++) {
-                    const res = await client.send(new CreateSubnetCommand({
-                        VpcId: vpcId, CidrBlock: groupCidrs[gi][i],
-                        AvailabilityZone: group.az || availabilityZone || undefined,
-                    }))
-                    const sid = res.Subnet!.SubnetId!
-                    await client.send(new CreateTagsCommand({Resources: [sid], Tags: [{Key: 'Name', Value: `${name}-${group.name}-${i + 1}`}]}))
-                    subnetIds.push(sid)
-                }
-                createdGroups.push({name: group.name, isPublic: group.isPublic, subnetIds})
-            }
-
-            const publicSubnetIds = createdGroups.filter((g) => g.isPublic).flatMap((g) => g.subnetIds)
-            const privateSubnetIds = createdGroups.filter((g) => !g.isPublic).flatMap((g) => g.subnetIds)
-
-            // 4. Public route table → 0.0.0.0/0 → IGW (if any public subnets)
-            const pubRtRes = await client.send(new CreateRouteTableCommand({VpcId: vpcId}))
-            const publicRtbId = pubRtRes.RouteTable!.RouteTableId!
-            await client.send(new CreateTagsCommand({Resources: [publicRtbId], Tags: [{Key: 'Name', Value: `${name}-pub-rtb`}]}))
-            if (publicSubnetIds.length > 0) {
-                await client.send(new CreateRouteCommand({RouteTableId: publicRtbId, DestinationCidrBlock: '0.0.0.0/0', GatewayId: igwId}))
-                for (const sid of publicSubnetIds) {
-                    await client.send(new AssociateRouteTableCommand({RouteTableId: publicRtbId, SubnetId: sid}))
-                }
-            }
-
-            // 5. NAT Gateway + private route table (if any private subnets and NAT requested)
-            // NAT Gateway is skipped silently when not supported (e.g. LocalStack free tier).
-            let natGatewayId: string | undefined
-            let eipAllocationId: string | undefined
-            let privateRtbId: string | undefined
-
-            if (natGateway && privateSubnetIds.length > 0 && publicSubnetIds.length > 0) {
-                try {
-                    const eipRes = await client.send(new AllocateAddressCommand({Domain: 'vpc'}))
-                    eipAllocationId = eipRes.AllocationId!
-
-                    const natRes = await client.send(new CreateNatGatewayCommand({
-                        SubnetId: publicSubnetIds[0], AllocationId: eipAllocationId, ConnectivityType: 'public',
-                    }))
-                    natGatewayId = natRes.NatGateway!.NatGatewayId!
-                    await client.send(new CreateTagsCommand({Resources: [natGatewayId], Tags: [{Key: 'Name', Value: `${name}-nat`}]}))
-
-                    // Poll until available
-                    for (let attempt = 0; attempt < 15; attempt++) {
-                        const st = await client.send(new DescribeNatGatewaysCommand({NatGatewayIds: [natGatewayId]}))
-                        const state = st.NatGateways?.[0]?.State
-                        if (state === 'available') break
-                        if (state === 'failed') throw new Error(`NAT Gateway ${natGatewayId} failed to become available`)
-                        await new Promise((r) => setTimeout(r, 1000))
+            const rollbackActions: Array<{resource: string; run: () => Promise<unknown>}> = []
+            const rollbackFrom = async (start: number): Promise<unknown[]> => {
+                const failures: unknown[] = []
+                for (const action of rollbackActions.splice(start).reverse()) {
+                    try {
+                        await action.run()
+                    } catch (error) {
+                        console.warn(`Failed to roll back ${action.resource}`, error)
+                        failures.push(error)
                     }
-
-                    const privRtRes = await client.send(new CreateRouteTableCommand({VpcId: vpcId}))
-                    privateRtbId = privRtRes.RouteTable!.RouteTableId!
-                    await client.send(new CreateTagsCommand({Resources: [privateRtbId], Tags: [{Key: 'Name', Value: `${name}-pri-rtb`}]}))
-                    await client.send(new CreateRouteCommand({RouteTableId: privateRtbId, DestinationCidrBlock: '0.0.0.0/0', NatGatewayId: natGatewayId}))
-                    for (const sid of privateSubnetIds) {
-                        await client.send(new AssociateRouteTableCommand({RouteTableId: privateRtbId, SubnetId: sid}))
-                    }
-                } catch (err) {
-                    if (!isUnsupportedOperation(err)) throw err
-                    // Not supported (e.g. LocalStack) — skip NAT GW silently
-                    natGatewayId = undefined
-                    eipAllocationId = undefined
                 }
+                return failures
             }
 
-            return {
-                vpcId, igwId,
-                publicSubnetIds, privateSubnetIds,
-                subnetGroups: createdGroups,
-                natGatewayId, eipAllocationId,
-                publicRouteTableId: publicRtbId, privateRouteTableId: privateRtbId,
+            try {
+                // 1. VPC
+                const vpcRes = await client.send(new CreateVpcCommand({CidrBlock: cidrBlock}))
+                const vpcId = vpcRes.Vpc!.VpcId!
+                rollbackActions.push({resource: vpcId, run: () => client.send(new DeleteVpcCommand({VpcId: vpcId}))})
+                await client.send(new CreateTagsCommand({Resources: [vpcId], Tags: [{Key: 'Name', Value: name}]}))
+
+                // 2. Internet Gateway
+                const igwRes = await client.send(new CreateInternetGatewayCommand({}))
+                const igwId = igwRes.InternetGateway!.InternetGatewayId!
+                rollbackActions.push({resource: igwId, run: () => client.send(new DeleteInternetGatewayCommand({InternetGatewayId: igwId}))})
+                await client.send(new CreateTagsCommand({Resources: [igwId], Tags: [{Key: 'Name', Value: `${name}-igw`}]}))
+                await client.send(new AttachInternetGatewayCommand({InternetGatewayId: igwId, VpcId: vpcId}))
+                rollbackActions.push({resource: `${igwId} attachment`, run: () => client.send(new DetachInternetGatewayCommand({InternetGatewayId: igwId, VpcId: vpcId}))})
+
+                // 3. Create subnets per group
+                const createdGroups: Array<{name: string; isPublic: boolean; subnetIds: string[]}> = []
+                for (let gi = 0; gi < subnetGroups.length; gi++) {
+                    const group = subnetGroups[gi]
+                    const subnetIds: string[] = []
+                    for (let i = 0; i < group.count; i++) {
+                        const res = await client.send(new CreateSubnetCommand({
+                            VpcId: vpcId, CidrBlock: groupCidrs[gi][i],
+                            AvailabilityZone: group.az || availabilityZone || undefined,
+                        }))
+                        const sid = res.Subnet!.SubnetId!
+                        rollbackActions.push({resource: sid, run: () => client.send(new DeleteSubnetCommand({SubnetId: sid}))})
+                        await client.send(new CreateTagsCommand({Resources: [sid], Tags: [{Key: 'Name', Value: `${name}-${group.name}-${i + 1}`}]}))
+                        subnetIds.push(sid)
+                    }
+                    createdGroups.push({name: group.name, isPublic: group.isPublic, subnetIds})
+                }
+
+                const publicSubnetIds = createdGroups.filter((g) => g.isPublic).flatMap((g) => g.subnetIds)
+                const privateSubnetIds = createdGroups.filter((g) => !g.isPublic).flatMap((g) => g.subnetIds)
+
+                // 4. Public route table → 0.0.0.0/0 → IGW (if any public subnets)
+                const pubRtRes = await client.send(new CreateRouteTableCommand({VpcId: vpcId}))
+                const publicRtbId = pubRtRes.RouteTable!.RouteTableId!
+                rollbackActions.push({resource: publicRtbId, run: () => client.send(new DeleteRouteTableCommand({RouteTableId: publicRtbId}))})
+                await client.send(new CreateTagsCommand({Resources: [publicRtbId], Tags: [{Key: 'Name', Value: `${name}-pub-rtb`}]}))
+                if (publicSubnetIds.length > 0) {
+                    await client.send(new CreateRouteCommand({RouteTableId: publicRtbId, DestinationCidrBlock: '0.0.0.0/0', GatewayId: igwId}))
+                    for (const sid of publicSubnetIds) {
+                        const association = await client.send(new AssociateRouteTableCommand({RouteTableId: publicRtbId, SubnetId: sid}))
+                        if (association.AssociationId) {
+                            const associationId = association.AssociationId
+                            rollbackActions.push({resource: associationId, run: () => client.send(new DisassociateRouteTableCommand({AssociationId: associationId}))})
+                        }
+                    }
+                }
+
+                // 5. NAT Gateway + private route table (if any private subnets and NAT requested)
+                // NAT Gateway is skipped silently when not supported (e.g. LocalStack free tier).
+                let natGatewayId: string | undefined
+                let eipAllocationId: string | undefined
+                let privateRtbId: string | undefined
+
+                if (natGateway && privateSubnetIds.length > 0 && publicSubnetIds.length > 0) {
+                    const natRollbackStart = rollbackActions.length
+                    try {
+                        const eipRes = await client.send(new AllocateAddressCommand({Domain: 'vpc'}))
+                        eipAllocationId = eipRes.AllocationId!
+                        const allocationId = eipAllocationId
+                        rollbackActions.push({resource: allocationId, run: () => client.send(new ReleaseAddressCommand({AllocationId: allocationId}))})
+
+                        const natRes = await client.send(new CreateNatGatewayCommand({
+                            SubnetId: publicSubnetIds[0], AllocationId: eipAllocationId, ConnectivityType: 'public',
+                        }))
+                        natGatewayId = natRes.NatGateway!.NatGatewayId!
+                        const createdNatId = natGatewayId
+                        rollbackActions.push({resource: createdNatId, run: async () => {
+                            await client.send(new DeleteNatGatewayCommand({NatGatewayId: createdNatId}))
+                            // The EC2 deletion waiter allows about ten minutes before dependent cleanup.
+                            for (let attempt = 0; attempt < 600; attempt++) {
+                                let state
+                                try {
+                                    const result = await client.send(new DescribeNatGatewaysCommand({NatGatewayIds: [createdNatId]}))
+                                    state = result.NatGateways?.[0]?.State
+                                } catch (error) {
+                                    if (error instanceof Error && error.name === 'NatGatewayNotFound') return
+                                    throw error
+                                }
+                                if (!state || state === 'deleted') return
+                                if (attempt < 599) await new Promise((resolve) => setTimeout(resolve, 1000))
+                            }
+                            throw new Error(`NAT Gateway ${createdNatId} was not deleted during rollback`)
+                        }})
+                        await client.send(new CreateTagsCommand({Resources: [natGatewayId], Tags: [{Key: 'Name', Value: `${name}-nat`}]}))
+
+                        // Poll until available
+                        for (let attempt = 0; attempt < 15; attempt++) {
+                            const st = await client.send(new DescribeNatGatewaysCommand({NatGatewayIds: [natGatewayId]}))
+                            const state = st.NatGateways?.[0]?.State
+                            if (state === 'available') break
+                            if (state === 'failed') throw new Error(`NAT Gateway ${natGatewayId} failed to become available`)
+                            await new Promise((r) => setTimeout(r, 1000))
+                        }
+
+                        const privRtRes = await client.send(new CreateRouteTableCommand({VpcId: vpcId}))
+                        privateRtbId = privRtRes.RouteTable!.RouteTableId!
+                        const createdPrivateRtbId = privateRtbId
+                        rollbackActions.push({resource: createdPrivateRtbId, run: () => client.send(new DeleteRouteTableCommand({RouteTableId: createdPrivateRtbId}))})
+                        await client.send(new CreateTagsCommand({Resources: [privateRtbId], Tags: [{Key: 'Name', Value: `${name}-pri-rtb`}]}))
+                        await client.send(new CreateRouteCommand({RouteTableId: privateRtbId, DestinationCidrBlock: '0.0.0.0/0', NatGatewayId: natGatewayId}))
+                        for (const sid of privateSubnetIds) {
+                            const association = await client.send(new AssociateRouteTableCommand({RouteTableId: privateRtbId, SubnetId: sid}))
+                            if (association.AssociationId) {
+                                const associationId = association.AssociationId
+                                rollbackActions.push({resource: associationId, run: () => client.send(new DisassociateRouteTableCommand({AssociationId: associationId}))})
+                            }
+                        }
+                    } catch (err) {
+                        if (!isUnsupportedOperation(err)) throw err
+                        const failures = await rollbackFrom(natRollbackStart)
+                        if (failures.length) throw new AggregateError([err, ...failures], 'Failed to clean up unsupported NAT Gateway')
+                        natGatewayId = undefined
+                        eipAllocationId = undefined
+                        privateRtbId = undefined
+                    }
+                }
+
+                return {
+                    vpcId, igwId,
+                    publicSubnetIds, privateSubnetIds,
+                    subnetGroups: createdGroups,
+                    natGatewayId, eipAllocationId,
+                    publicRouteTableId: publicRtbId, privateRouteTableId: privateRtbId,
+                }
+            } catch (error) {
+                await rollbackFrom(0)
+                throw error
             }
         },
     }
